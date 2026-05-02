@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
-import { activate } from '../../extension';
+import { activate, readEligibleTextContent } from '../../extension';
 import { patchProperty, restoreProperty } from './helpers/propertyPatch';
 
 suite('extension activation', () => {
@@ -264,5 +264,38 @@ suite('extension activation', () => {
       'workspace/src/app/main.ts',
       'workspace/src/app/main.ts'
     ]);
+  });
+
+  test('checks file size before reading file contents for text indexing', async () => {
+    const smallFile = vscode.Uri.file('c:\\workspace\\src\\small.ts');
+    const largeFile = vscode.Uri.file('c:\\workspace\\src\\large.ts');
+    const statCalls: string[] = [];
+    const readCalls: string[] = [];
+    const fileSystem = {
+      stat: async (uri: vscode.Uri) => {
+        statCalls.push(uri.fsPath);
+        return {
+          type: vscode.FileType.File,
+          ctime: 0,
+          mtime: 0,
+          size: uri.fsPath.endsWith('large.ts') ? 1025 : 1024
+        };
+      },
+      readFile: async (uri: vscode.Uri) => {
+        readCalls.push(uri.fsPath);
+        return Buffer.from('export const value = 1;');
+      }
+    };
+
+    const smallContent = await readEligibleTextContent(fileSystem, smallFile, 'src/small.ts', 1);
+    const largeContent = await readEligibleTextContent(fileSystem, largeFile, 'src/large.ts', 1);
+
+    assert.deepEqual(statCalls, [
+      'c:\\workspace\\src\\small.ts',
+      'c:\\workspace\\src\\large.ts'
+    ]);
+    assert.deepEqual(readCalls, ['c:\\workspace\\src\\small.ts']);
+    assert.equal(smallContent, 'export const value = 1;');
+    assert.equal(largeContent, undefined);
   });
 });

@@ -69,9 +69,9 @@ async function buildWorkspaceIndexes(
       fileIndex.upsert(relativePath, file.toString(), toIndexedFileKey(file, relativePath));
 
       try {
-        const bytes = await vscode.workspace.fs.readFile(file);
-        if (isEligibleTextFile(relativePath, bytes.byteLength, maxFileSizeKb)) {
-          textIndex.upsert(relativePath, file.toString(), Buffer.from(bytes).toString('utf8'));
+        const content = await readEligibleTextContent(vscode.workspace.fs, file, relativePath, maxFileSizeKb);
+        if (content !== undefined) {
+          textIndex.upsert(relativePath, file.toString(), content);
         }
       } catch (error) {
         output.appendLine(`Failed to read ${relativePath} for text indexing: ${error instanceof Error ? error.message : String(error)}`);
@@ -80,6 +80,21 @@ async function buildWorkspaceIndexes(
   } catch (error) {
     output.appendLine(`Failed to build initial file index: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+export async function readEligibleTextContent(
+  fileSystem: Pick<typeof vscode.workspace.fs, 'stat' | 'readFile'>,
+  file: vscode.Uri,
+  relativePath: string,
+  maxFileSizeKb: number
+): Promise<string | undefined> {
+  const stat = await fileSystem.stat(file);
+  if (!isEligibleTextFile(relativePath, stat.size, maxFileSizeKb)) {
+    return undefined;
+  }
+
+  const bytes = await fileSystem.readFile(file);
+  return Buffer.from(bytes).toString('utf8');
 }
 
 function toIndexedFileKey(file: vscode.Uri, relativePath: string): string {
