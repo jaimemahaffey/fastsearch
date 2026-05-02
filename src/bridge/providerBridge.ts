@@ -7,13 +7,24 @@ export async function getDocumentSymbols(uri: vscode.Uri): Promise<SymbolRecord[
     uri
   );
 
-  return (symbols ?? []).map((symbol) => ({
-    name: symbol.name,
-    kind: symbol.kind,
-    containerName: symbol.detail,
-    uri: uri.toString(),
-    startLine: symbol.selectionRange.start.line,
-    startColumn: symbol.selectionRange.start.character,
-    approximate: false
-  }));
+  return flattenDocumentSymbols(symbols ?? [], uri.toString());
+}
+
+function flattenDocumentSymbols(
+  symbols: readonly vscode.DocumentSymbol[],
+  uri: string,
+  parentName?: string
+): SymbolRecord[] {
+  return symbols.flatMap((symbol) => [
+    {
+      name: symbol.name,
+      kind: symbol.kind,
+      containerName: parentName,
+      uri,
+      startLine: symbol.selectionRange.start.line,
+      startColumn: symbol.selectionRange.start.character,
+      approximate: false
+    },
+    ...flattenDocumentSymbols(symbol.children, uri, symbol.name)
+  ]);
 }
