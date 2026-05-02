@@ -1,0 +1,77 @@
+{
+  "name": "fast-symbol-indexer",
+  "displayName": "Fast Symbol Indexer",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.98.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*",
+    "onCommand:fastIndexer.goToFile",
+    "onCommand:fastIndexer.goToSymbol",
+    "onCommand:fastIndexer.goToText",
+    "onCommand:fastIndexer.findUsages",
+    "onCommand:fastIndexer.findImplementations",
+    "onCommand:fastIndexer.rebuildIndex"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "fastIndexer.goToFile",
+        "title": "Fast Indexer: Go To File"
+      },
+      {
+        "command": "fastIndexer.goToSymbol",
+        "title": "Fast Indexer: Go To Symbol"
+      },
+      {
+        "command": "fastIndexer.goToText",
+        "title": "Fast Indexer: Go To Text"
+      },
+      {
+        "command": "fastIndexer.findUsages",
+        "title": "Fast Indexer: Find Usages"
+      },
+      {
+        "command": "fastIndexer.findImplementations",
+        "title": "Fast Indexer: Find Implementations"
+      },
+      {
+        "command": "fastIndexer.rebuildIndex",
+        "title": "Fast Indexer: Rebuild Index"
+      }
+    ],
+    "configuration": {
+      "title": "Fast Symbol Indexer",
+      "properties": {
+        "fastIndexer.enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "fastIndexer.maxFileSizeKb": {
+          "type": "number",
+          "default": 512
+        },
+        "fastIndexer.debounceMs": {
+          "type": "number",
+          "default": 150
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "test": "npm run compile && node ./dist/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.15.17",
+    "@types/vscode": "^1.98.0",
+    "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.25.4",
+    "mocha": "^11.1.0",
+    "typescript": "^5.8.3"
+  }
+}
