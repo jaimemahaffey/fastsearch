@@ -83,6 +83,7 @@ The extension should contribute settings under `fastIndexer.*` for enabling inde
 - Indexing too much text can consume memory in large repositories.
 - File watcher storms can cause churn without careful debouncing.
 - Fallback usage and implementation results may be approximate; UI copy should not overstate semantic certainty.
+- `npm audit` currently reports dev-only vulnerabilities through `mocha` transitive dependencies (`diff` and `serialize-javascript`). A zero-audit lockfile can be produced with overrides, but that forces versions outside `mocha`'s declared dependency ranges and raises the effective install baseline to Node 20 because `serialize-javascript@7.0.5` requires it. Task 1 leaves those findings unresolved until `mocha` ships a stable compatible dependency update or the project explicitly adopts that higher-risk override strategy and Node baseline.
 
 ## Open Questions
 
