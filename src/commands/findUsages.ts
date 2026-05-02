@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getReferences } from '../bridge/providerBridge';
+import { SymbolIndex } from '../indexes/symbolIndex';
 import { TextIndex } from '../indexes/textIndex';
 
 export type DiscoveryResult = {
@@ -17,6 +18,7 @@ export function chooseUsageResults(
 
 export async function findUsages(
   textIndex: TextIndex,
+  symbolIndex: SymbolIndex,
   awaitFallbackReady?: () => Promise<void>
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
@@ -44,7 +46,10 @@ export async function findUsages(
   let fallbackResults: DiscoveryResult[] = [];
   if (providerResults.length === 0) {
     await awaitFallbackReady?.();
-    fallbackResults = textIndex.findApproximateUsages(query);
+    fallbackResults = mergeApproximateResults(
+      textIndex.findApproximateUsages(query),
+      symbolIndex.findApproximateUsages(query)
+    );
   }
 
   const results = chooseUsageResults(providerResults, fallbackResults);
@@ -78,4 +83,21 @@ export async function findUsages(
   } catch {
     void vscode.window.showErrorMessage(`Unable to open indexed discovery result: ${pick.label}`);
   }
+}
+
+function mergeApproximateResults(...resultSets: DiscoveryResult[][]): DiscoveryResult[] {
+  const merged: DiscoveryResult[] = [];
+  const seen = new Set<string>();
+
+  for (const result of resultSets.flat()) {
+    const key = `${result.uri}:${result.line}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    merged.push(result);
+  }
+
+  return merged;
 }

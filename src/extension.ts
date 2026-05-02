@@ -136,7 +136,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.findUsages', async () => {
-    await findUsages(textIndex, async () => {
+    await findUsages(textIndex, symbolIndex, async () => {
       if (initialFileIndexBuildPending) {
         void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
       }

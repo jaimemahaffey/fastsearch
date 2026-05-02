@@ -17,17 +17,13 @@ export async function getReferences(position: vscode.Position): Promise<Discover
     return [];
   }
 
-  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+  const locations = await vscode.commands.executeCommand<readonly vscode.Location[]>(
     'vscode.executeReferenceProvider',
     editor.document.uri,
     position
   );
 
-  return (locations ?? []).map((location) => ({
-    uri: location.uri.toString(),
-    line: location.range.start.line,
-    approximate: false
-  }));
+  return (locations ?? []).map(toDiscoveryResult);
 }
 
 export async function getImplementations(position: vscode.Position): Promise<DiscoveryResult[]> {
@@ -36,17 +32,13 @@ export async function getImplementations(position: vscode.Position): Promise<Dis
     return [];
   }
 
-  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+  const locations = await vscode.commands.executeCommand<readonly (vscode.Location | vscode.LocationLink)[]>(
     'vscode.executeImplementationProvider',
     editor.document.uri,
     position
   );
 
-  return (locations ?? []).map((location) => ({
-    uri: location.uri.toString(),
-    line: location.range.start.line,
-    approximate: false
-  }));
+  return (locations ?? []).map(toDiscoveryResult);
 }
 
 function flattenDocumentSymbols(
@@ -66,4 +58,21 @@ function flattenDocumentSymbols(
     },
     ...flattenDocumentSymbols(symbol.children, uri, symbol.name)
   ]);
+}
+
+function toDiscoveryResult(location: vscode.Location | vscode.LocationLink): DiscoveryResult {
+  if ('targetUri' in location) {
+    const targetRange = location.targetSelectionRange ?? location.targetRange;
+    return {
+      uri: location.targetUri.toString(),
+      line: targetRange.start.line,
+      approximate: false
+    };
+  }
+
+  return {
+    uri: location.uri.toString(),
+    line: location.range.start.line,
+    approximate: false
+  };
 }

@@ -33,7 +33,15 @@ export class SymbolIndex {
       .sort((a, b) => Number(a.approximate) - Number(b.approximate) || a.name.localeCompare(b.name));
   }
 
+  findApproximateUsages(query: string): DiscoveryResult[] {
+    return this.toApproximateResults(query);
+  }
+
   findApproximateImplementations(query: string): DiscoveryResult[] {
+    return this.toApproximateResults(query);
+  }
+
+  private toApproximateResults(query: string): DiscoveryResult[] {
     return this.search(query).map((symbol) => ({
       uri: symbol.uri,
       line: symbol.startLine,
