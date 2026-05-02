@@ -2,6 +2,11 @@ import * as vscode from 'vscode';
 import { TextIndex } from '../indexes/textIndex';
 
 export async function goToText(textIndex: TextIndex): Promise<void> {
+  if (textIndex.isEmpty()) {
+    void vscode.window.showInformationMessage('No indexed text is available yet.');
+    return;
+  }
+
   const query = await vscode.window.showInputBox({ prompt: 'Search indexed text' });
   if (!query) {
     return;

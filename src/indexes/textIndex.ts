@@ -9,6 +9,10 @@ export type TextMatch = {
 export class TextIndex {
   private readonly contents = new Map<string, { uri: string; content: string }>();
 
+  isEmpty(): boolean {
+    return this.contents.size === 0;
+  }
+
   upsert(relativePath: string, uri: string, content: string): void {
     this.contents.set(relativePath, { uri, content });
   }
