@@ -55,6 +55,18 @@ suite('SymbolIndex', () => {
 
     assert.equal(index.isEmpty(), true);
   });
+
+  test('clear removes all indexed symbols', () => {
+    const index = new SymbolIndex();
+
+    index.replaceForFile('src/service.ts', [
+      createSymbol({ name: 'UserService', approximate: false })
+    ]);
+    index.clear();
+
+    assert.equal(index.isEmpty(), true);
+    assert.deepEqual(index.search('UserService'), []);
+  });
 });
 
 function createSymbol(overrides: Partial<SymbolRecord> & Pick<SymbolRecord, 'name'>): SymbolRecord {

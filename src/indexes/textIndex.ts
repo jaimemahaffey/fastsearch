@@ -15,6 +15,10 @@ export class TextIndex {
     return this.contents.size === 0;
   }
 
+  clear(): void {
+    this.contents.clear();
+  }
+
   upsert(relativePath: string, uri: string, content: string): void {
     this.contents.set(relativePath, { uri, content });
   }

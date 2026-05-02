@@ -33,4 +33,14 @@ suite('FileIndex', () => {
     assert.equal(results[0]?.basename, 'main.ts');
     assert.equal(results[1]?.basename, 'bootstrap.ts');
   });
+
+  test('clear removes all indexed file entries', () => {
+    const index = new FileIndex();
+
+    index.upsert('src/app/main.ts', 'c:/ws/src/app/main.ts');
+    index.clear();
+
+    assert.equal(index.isEmpty(), true);
+    assert.deepEqual(index.search('main'), []);
+  });
 });

@@ -298,4 +298,71 @@ suite('extension activation', () => {
     assert.equal(smallContent, 'export const value = 1;');
     assert.equal(largeContent, undefined);
   });
+
+  test('shows an informational message instead of rebuilding while the initial index build is still running', async () => {
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    let infoMessage: string | undefined;
+    let resolveFindFiles: ((files: vscode.Uri[]) => void) | undefined;
+    let withProgressCalls = 0;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const infoPatch = patchProperty(vscode.window, 'showInformationMessage', (async (message: string) => {
+      infoMessage = message;
+      return undefined;
+    }) as typeof vscode.window.showInformationMessage);
+    const progressPatch = patchProperty(vscode.window, 'withProgress', (async (...args: Parameters<typeof vscode.window.withProgress>) => {
+      withProgressCalls += 1;
+      return args[1]({ report: () => undefined }, { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => undefined }) });
+    }) as typeof vscode.window.withProgress);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => {
+        registeredCommands.delete(command);
+      });
+    }) as typeof vscode.commands.registerCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', ((() => new Promise<vscode.Uri[]>((resolve) => {
+      resolveFindFiles = resolve;
+    })) as unknown) as typeof vscode.workspace.findFiles);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      return typeof pathOrUri === 'string' ? pathOrUri : 'src/app/main.ts';
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', ((uri: vscode.Uri) => ({
+      uri: vscode.Uri.file('c:\\workspace'),
+      index: 0,
+      name: 'workspace'
+    })) as typeof vscode.workspace.getWorkspaceFolder);
+
+    try {
+      activate({
+        subscriptions: []
+      } as unknown as vscode.ExtensionContext);
+
+      const rebuildIndexCommand = registeredCommands.get('fastIndexer.rebuildIndex');
+      assert.ok(rebuildIndexCommand, 'rebuildIndex command should be registered');
+
+      await Promise.resolve(rebuildIndexCommand?.());
+
+      assert.equal(infoMessage, 'Initial index build is still running. Please wait for it to finish before rebuilding.');
+      assert.equal(withProgressCalls, 0);
+
+      resolveFindFiles?.([vscode.Uri.file('c:\\workspace\\src\\app\\main.ts')]);
+    } finally {
+      restoreProperty(outputPatch);
+      restoreProperty(infoPatch);
+      restoreProperty(progressPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(workspaceFolderPatch);
+    }
+  });
 });

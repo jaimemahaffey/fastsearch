@@ -45,6 +45,20 @@ suite('TextIndex', () => {
 
     assert.equal(results.length, 200);
   });
+
+  test('clear removes all indexed text content', () => {
+    const index = new TextIndex();
+
+    index.upsert(
+      'src/alpha.ts',
+      'file:///c:/ws/src/alpha.ts',
+      'export const alpha = 1;\nexport const beta = alpha + 1;'
+    );
+    index.clear();
+
+    assert.equal(index.isEmpty(), true);
+    assert.deepEqual(index.search('alpha'), []);
+  });
 });
 
 suite('isEligibleTextFile', () => {

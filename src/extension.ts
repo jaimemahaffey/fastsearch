@@ -15,6 +15,7 @@ import type { WorkspacePersistence } from './shared/types';
 
 const WORKSPACE_FILE_EXCLUDE_GLOB = '**/{node_modules,.git,.hg,.svn,dist,build,coverage,out,target}/**';
 const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a moment.';
+const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
 
 const STUB_COMMANDS = [
   'fastIndexer.findUsages',
@@ -31,6 +32,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const workspacePersistence = getWorkspacePersistence();
   const buildWorkspace = async () => buildWorkspaceIndexes(fileIndex, symbolIndex, textIndex, config.maxFileSizeKb, output);
   const coordinator = new IndexCoordinator({
+    clearIndexes: () => {
+      fileIndex.clear();
+      symbolIndex.clear();
+      textIndex.clear();
+    },
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
     buildWorkspace
   });
@@ -69,6 +75,11 @@ export function activate(context: vscode.ExtensionContext): void {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.rebuildIndex', async () => {
+    if (initialFileIndexBuildPending) {
+      void vscode.window.showInformationMessage(INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE);
+      return;
+    }
+
     await rebuildIndex(coordinator);
   }));
 
