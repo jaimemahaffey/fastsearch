@@ -1,2 +1,6 @@
 src/**
 tsconfig.json
+esbuild.mjs
+node_modules/**
+.vscode-test/**
+package-lock.json
