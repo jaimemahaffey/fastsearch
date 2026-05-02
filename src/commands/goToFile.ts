@@ -12,8 +12,14 @@ export async function goToFile(fileIndex: FileIndex): Promise<void> {
     return;
   }
 
+  const matches = fileIndex.search(query);
+  if (matches.length === 0) {
+    void vscode.window.showInformationMessage(`No indexed files matched "${query}".`);
+    return;
+  }
+
   const pick = await vscode.window.showQuickPick(
-    fileIndex.search(query).map((entry) => ({
+    matches.map((entry) => ({
       label: entry.basename,
       description: entry.relativePath,
       entry

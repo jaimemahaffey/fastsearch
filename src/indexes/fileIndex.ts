@@ -9,8 +9,8 @@ export class FileIndex {
     return this.entries.size === 0;
   }
 
-  upsert(relativePath: string, uri: string): void {
-    this.entries.set(relativePath, {
+  upsert(relativePath: string, uri: string, key = relativePath): void {
+    this.entries.set(key, {
       relativePath,
       uri,
       basename: path.basename(relativePath),

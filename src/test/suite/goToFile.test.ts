@@ -2,35 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import { goToFile } from '../../commands/goToFile';
 import { FileIndex } from '../../indexes/fileIndex';
-
-type RestorableProperty<T extends object, K extends keyof T> = {
-  target: T;
-  key: K;
-  descriptor: PropertyDescriptor | undefined;
-};
-
-function patchProperty<T extends object, K extends keyof T>(
-  target: T,
-  key: K,
-  value: T[K]
-): RestorableProperty<T, K> {
-  const descriptor = Object.getOwnPropertyDescriptor(target, key);
-  Object.defineProperty(target, key, {
-    configurable: true,
-    writable: true,
-    value
-  });
-  return { target, key, descriptor };
-}
-
-function restoreProperty<T extends object, K extends keyof T>(restorable: RestorableProperty<T, K>): void {
-  if (restorable.descriptor) {
-    Object.defineProperty(restorable.target, restorable.key, restorable.descriptor);
-    return;
-  }
-
-  delete restorable.target[restorable.key];
-}
+import { patchProperty, restoreProperty } from './helpers/propertyPatch';
 
 suite('goToFile', () => {
   test('shows an informational message when no indexed files are available', async () => {
@@ -95,5 +67,34 @@ suite('goToFile', () => {
 
     assert.equal(documentShown, false);
     assert.equal(errorMessage, 'Unable to open indexed file: src/app/main.ts');
+  });
+
+  test('shows an informational message when the query has no indexed matches', async () => {
+    const index = new FileIndex();
+    index.upsert('src/app/main.ts', vscode.Uri.file('c:\\workspace\\src\\app\\main.ts').toString());
+
+    let infoMessage: string | undefined;
+    let quickPickShown = false;
+
+    const inputPatch = patchProperty(vscode.window, 'showInputBox', (async () => 'missing') as typeof vscode.window.showInputBox);
+    const infoPatch = patchProperty(vscode.window, 'showInformationMessage', (async (message: string) => {
+      infoMessage = message;
+      return undefined;
+    }) as typeof vscode.window.showInformationMessage);
+    const pickPatch = patchProperty(vscode.window, 'showQuickPick', ((async () => {
+      quickPickShown = true;
+      return undefined;
+    }) as unknown) as typeof vscode.window.showQuickPick);
+
+    try {
+      await goToFile(index);
+    } finally {
+      restoreProperty(inputPatch);
+      restoreProperty(infoPatch);
+      restoreProperty(pickPatch);
+    }
+
+    assert.equal(quickPickShown, false);
+    assert.equal(infoMessage, 'No indexed files matched "missing".');
   });
 });
