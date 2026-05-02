@@ -5,7 +5,7 @@ export class IndexCoordinator {
 
   constructor(
     private readonly actions: {
-      clearIndexes?: () => void | Promise<void>;
+      clearIndexes: () => void | Promise<void>;
       clearPersistence: () => Promise<void>;
       buildWorkspace: () => Promise<void>;
     }
@@ -29,9 +29,15 @@ export class IndexCoordinator {
 
   async rebuild(): Promise<void> {
     this.state = 'rebuilding';
-    await this.actions.clearIndexes?.();
-    await this.actions.clearPersistence();
-    await this.actions.buildWorkspace();
-    this.state = 'ready';
+
+    try {
+      await this.actions.clearIndexes();
+      await this.actions.clearPersistence();
+      await this.actions.buildWorkspace();
+      this.state = 'ready';
+    } catch (error) {
+      this.state = 'stale';
+      throw error;
+    }
   }
 }

@@ -365,4 +365,100 @@ suite('extension activation', () => {
       restoreProperty(workspaceFolderPatch);
     }
   });
+
+  test('ignores watcher updates from excluded heavy paths', async () => {
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    let onDidCreate: ((uri: vscode.Uri) => void) | undefined;
+    let scheduledRefreshes = 0;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => {
+        registeredCommands.delete(command);
+      });
+    }) as typeof vscode.commands.registerCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => [
+      vscode.Uri.file('c:\\workspace\\src\\app\\main.ts')
+    ]) as typeof vscode.workspace.findFiles);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      if (typeof pathOrUri === 'string') {
+        return pathOrUri;
+      }
+
+      return pathOrUri.fsPath.includes('node_modules')
+        ? 'node_modules/pkg/index.js'
+        : 'src/app/main.ts';
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', ((uri: vscode.Uri) => ({
+      uri: vscode.Uri.file('c:\\workspace'),
+      index: 0,
+      name: 'workspace'
+    })) as typeof vscode.workspace.getWorkspaceFolder);
+    const inputPatch = patchProperty(vscode.window, 'showInputBox', (async () => undefined) as typeof vscode.window.showInputBox);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: (listener: (uri: vscode.Uri) => void) => {
+        onDidCreate = listener;
+        return new vscode.Disposable(() => {
+          onDidCreate = undefined;
+        });
+      },
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+
+    try {
+      activate({
+        subscriptions: []
+      } as unknown as vscode.ExtensionContext);
+
+      const goToFileCommand = registeredCommands.get('fastIndexer.goToFile');
+      assert.ok(goToFileCommand, 'goToFile command should be registered');
+      await Promise.resolve(goToFileCommand?.());
+
+      assert.ok(onDidCreate, 'watcher create handler should be registered');
+
+      const excludedTimeoutPatch = patchProperty(globalThis, 'setTimeout', (((callback: (...args: unknown[]) => void) => {
+        scheduledRefreshes += 1;
+        callback();
+        return {} as NodeJS.Timeout;
+      }) as unknown) as typeof globalThis.setTimeout);
+      onDidCreate?.(vscode.Uri.file('c:\\workspace\\node_modules\\pkg\\index.js'));
+      restoreProperty(excludedTimeoutPatch);
+
+      assert.equal(scheduledRefreshes, 0);
+
+      const includedTimeoutPatch = patchProperty(globalThis, 'setTimeout', (((callback: (...args: unknown[]) => void) => {
+        scheduledRefreshes += 1;
+        callback();
+        return {} as NodeJS.Timeout;
+      }) as unknown) as typeof globalThis.setTimeout);
+      onDidCreate?.(vscode.Uri.file('c:\\workspace\\src\\app\\main.ts'));
+      restoreProperty(includedTimeoutPatch);
+
+      assert.equal(scheduledRefreshes, 1);
+    } finally {
+      restoreProperty(outputPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(inputPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(configPatch);
+    }
+  });
 });

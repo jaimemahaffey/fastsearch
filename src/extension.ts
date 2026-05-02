@@ -7,13 +7,13 @@ import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator } from './core/indexCoordinator';
 import { PersistenceStore } from './core/persistenceStore';
+import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob } from './core/workspaceWatcher';
 import { FileIndex } from './indexes/fileIndex';
 import { SymbolIndex } from './indexes/symbolIndex';
 import { TextIndex } from './indexes/textIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 import type { WorkspacePersistence } from './shared/types';
 
-const WORKSPACE_FILE_EXCLUDE_GLOB = '**/{node_modules,.git,.hg,.svn,dist,build,coverage,out,target}/**';
 const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a moment.';
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
 
@@ -80,6 +80,14 @@ export function activate(context: vscode.ExtensionContext): void {
     runQueuedRebuild();
   };
 
+  const queueWorkspaceRefreshForJob = (job: UpdateJob): void => {
+    if (!shouldProcessUpdateJob(job)) {
+      return;
+    }
+
+    queueWorkspaceRefresh();
+  };
+
   coordinator.markWarming();
   const initialFileIndexBuild = buildWorkspace()
     .then(() => {
@@ -139,14 +147,23 @@ export function activate(context: vscode.ExtensionContext): void {
   const watcher = vscode.workspace.createFileSystemWatcher('**/*');
   context.subscriptions.push(
     watcher,
-    watcher.onDidCreate(() => {
-      queueWorkspaceRefresh();
+    watcher.onDidCreate((uri) => {
+      queueWorkspaceRefreshForJob({
+        type: 'create',
+        relativePath: vscode.workspace.asRelativePath(uri, true)
+      });
     }),
-    watcher.onDidChange(() => {
-      queueWorkspaceRefresh();
+    watcher.onDidChange((uri) => {
+      queueWorkspaceRefreshForJob({
+        type: 'change',
+        relativePath: vscode.workspace.asRelativePath(uri, true)
+      });
     }),
-    watcher.onDidDelete(() => {
-      queueWorkspaceRefresh();
+    watcher.onDidDelete((uri) => {
+      queueWorkspaceRefreshForJob({
+        type: 'delete',
+        relativePath: vscode.workspace.asRelativePath(uri, true)
+      });
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (requiresRebuild(event)) {
