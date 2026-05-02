@@ -8,7 +8,7 @@ suite('activation', () => {
 
     if (!extension.isActive) {
       await assert.doesNotReject(
-        () => vscode.commands.executeCommand('fastIndexer.goToFile'),
+        () => Promise.resolve(vscode.commands.executeCommand('fastIndexer.goToFile')),
         'goToFile should activate the extension'
       );
       assert.equal(extension.isActive, true, 'extension should be active after command execution');
@@ -26,7 +26,7 @@ suite('activation', () => {
     ]) {
       assert.ok(commands.includes(command), `missing command: ${command}`);
       await assert.doesNotReject(
-        () => vscode.commands.executeCommand(command),
+        () => Promise.resolve(vscode.commands.executeCommand(command)),
         `missing handler: ${command}`
       );
     }

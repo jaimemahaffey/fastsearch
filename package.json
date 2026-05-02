@@ -67,7 +67,8 @@
   },
   "scripts": {
     "compile": "node esbuild.mjs",
-    "test": "npm run compile && node ./dist/test/runTest.js"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run compile && node ./dist/test/runTest.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
