@@ -1,1 +1,5 @@
 .worktrees/
+dist/
+node_modules/
+.vscode-test/
+dist/**/*.map

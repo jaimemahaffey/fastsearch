@@ -1,6 +1,7 @@
 {
   "name": "fast-symbol-indexer",
   "displayName": "Fast Symbol Indexer",
+  "description": "VS Code extension for fast workspace symbol indexing and navigation.",
   "version": "0.0.1",
   "publisher": "local",
   "engines": {
@@ -48,15 +49,18 @@
       "properties": {
         "fastIndexer.enabled": {
           "type": "boolean",
-          "default": true
+          "default": true,
+          "description": "Enable or disable Fast Symbol Indexer commands and background indexing."
         },
         "fastIndexer.maxFileSizeKb": {
           "type": "number",
-          "default": 512
+          "default": 512,
+          "description": "Maximum file size in KB to include when indexing workspace files."
         },
         "fastIndexer.debounceMs": {
           "type": "number",
-          "default": 150
+          "default": 150,
+          "description": "Delay in milliseconds before refreshing the index after workspace changes."
         }
       }
     }
