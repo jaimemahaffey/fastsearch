@@ -4,7 +4,7 @@ import { goToFile } from './commands/goToFile';
 import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
-import { readConfig } from './configuration';
+import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator } from './core/indexCoordinator';
 import { PersistenceStore } from './core/persistenceStore';
 import { FileIndex } from './indexes/fileIndex';
@@ -24,13 +24,14 @@ const STUB_COMMANDS = [
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Fast Symbol Indexer');
-  const config = readConfig();
+  const getConfig = () => readConfig();
+  const config = getConfig();
   const fileIndex = new FileIndex();
   const symbolIndex = new SymbolIndex();
   const textIndex = new TextIndex();
   const persistenceStore = new PersistenceStore(context.globalStorageUri?.fsPath ?? context.storageUri?.fsPath ?? '.fast-indexer-cache');
   const workspacePersistence = getWorkspacePersistence();
-  const buildWorkspace = async () => buildWorkspaceIndexes(fileIndex, symbolIndex, textIndex, config.maxFileSizeKb, output);
+  const buildWorkspace = async () => buildWorkspaceIndexes(fileIndex, symbolIndex, textIndex, getConfig().maxFileSizeKb, output);
   const coordinator = new IndexCoordinator({
     clearIndexes: () => {
       fileIndex.clear();
@@ -41,9 +42,55 @@ export function activate(context: vscode.ExtensionContext): void {
     buildWorkspace
   });
   let initialFileIndexBuildPending = true;
-  const initialFileIndexBuild = buildWorkspace().finally(() => {
-    initialFileIndexBuildPending = false;
-  });
+  let rebuildQueued = false;
+  let rebuildInFlight = false;
+  let rebuildTimeout: NodeJS.Timeout | undefined;
+
+  const runQueuedRebuild = (): void => {
+    if (initialFileIndexBuildPending || rebuildInFlight) {
+      return;
+    }
+
+    rebuildQueued = false;
+    rebuildTimeout = setTimeout(() => {
+      rebuildTimeout = undefined;
+      rebuildInFlight = true;
+      void coordinator.rebuild()
+        .catch((error) => {
+          output.appendLine(`Failed to refresh workspace indexes: ${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => {
+          rebuildInFlight = false;
+          if (rebuildQueued) {
+            runQueuedRebuild();
+          }
+        });
+    }, getConfig().debounceMs);
+  };
+
+  const queueWorkspaceRefresh = (): void => {
+    rebuildQueued = true;
+    coordinator.markStale();
+
+    if (rebuildTimeout) {
+      clearTimeout(rebuildTimeout);
+      rebuildTimeout = undefined;
+    }
+
+    runQueuedRebuild();
+  };
+
+  coordinator.markWarming();
+  const initialFileIndexBuild = buildWorkspace()
+    .then(() => {
+      coordinator.markReady();
+    })
+    .finally(() => {
+      initialFileIndexBuildPending = false;
+      if (rebuildQueued) {
+        runQueuedRebuild();
+      }
+    });
 
   output.appendLine(`fastIndexer enabled=${config.enabled}`);
 
@@ -88,6 +135,25 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(`${command} is not implemented yet.`);
     }));
   }
+
+  const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+  context.subscriptions.push(
+    watcher,
+    watcher.onDidCreate(() => {
+      queueWorkspaceRefresh();
+    }),
+    watcher.onDidChange(() => {
+      queueWorkspaceRefresh();
+    }),
+    watcher.onDidDelete(() => {
+      queueWorkspaceRefresh();
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (requiresRebuild(event)) {
+        queueWorkspaceRefresh();
+      }
+    })
+  );
 
   context.subscriptions.push(output);
 }
