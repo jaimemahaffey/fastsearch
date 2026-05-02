@@ -1,3 +1,5 @@
+import type { DiscoveryResult } from '../commands/findUsages';
+
 export type SymbolRecord = {
   name: string;
   kind: number;
@@ -29,5 +31,13 @@ export class SymbolIndex {
       .flat()
       .filter((symbol) => symbol.name.toLowerCase().includes(needle))
       .sort((a, b) => Number(a.approximate) - Number(b.approximate) || a.name.localeCompare(b.name));
+  }
+
+  findApproximateImplementations(query: string): DiscoveryResult[] {
+    return this.search(query).map((symbol) => ({
+      uri: symbol.uri,
+      line: symbol.startLine,
+      approximate: true
+    }));
   }
 }

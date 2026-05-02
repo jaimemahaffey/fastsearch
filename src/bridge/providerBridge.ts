@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { DiscoveryResult } from '../commands/findUsages';
 import type { SymbolRecord } from '../indexes/symbolIndex';
 
 export async function getDocumentSymbols(uri: vscode.Uri): Promise<SymbolRecord[]> {
@@ -8,6 +9,44 @@ export async function getDocumentSymbols(uri: vscode.Uri): Promise<SymbolRecord[
   );
 
   return flattenDocumentSymbols(symbols ?? [], uri.toString());
+}
+
+export async function getReferences(position: vscode.Position): Promise<DiscoveryResult[]> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return [];
+  }
+
+  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+    'vscode.executeReferenceProvider',
+    editor.document.uri,
+    position
+  );
+
+  return (locations ?? []).map((location) => ({
+    uri: location.uri.toString(),
+    line: location.range.start.line,
+    approximate: false
+  }));
+}
+
+export async function getImplementations(position: vscode.Position): Promise<DiscoveryResult[]> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return [];
+  }
+
+  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+    'vscode.executeImplementationProvider',
+    editor.document.uri,
+    position
+  );
+
+  return (locations ?? []).map((location) => ({
+    uri: location.uri.toString(),
+    line: location.range.start.line,
+    approximate: false
+  }));
 }
 
 function flattenDocumentSymbols(

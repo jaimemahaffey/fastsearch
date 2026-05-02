@@ -1,3 +1,5 @@
+import type { DiscoveryResult } from '../commands/findUsages';
+
 export type TextMatch = {
   relativePath: string;
   uri: string;
@@ -57,5 +59,13 @@ export class TextIndex {
     }
 
     return results;
+  }
+
+  findApproximateUsages(query: string): DiscoveryResult[] {
+    return this.search(query).map((match) => ({
+      uri: match.uri,
+      line: match.line - 1,
+      approximate: true
+    }));
   }
 }

@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { getDocumentSymbols } from './bridge/providerBridge';
+import { findImplementations } from './commands/findImplementations';
+import { findUsages } from './commands/findUsages';
 import { goToFile } from './commands/goToFile';
 import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
@@ -16,11 +18,6 @@ import type { WorkspacePersistence } from './shared/types';
 
 const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a moment.';
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
-
-const STUB_COMMANDS = [
-  'fastIndexer.findUsages',
-  'fastIndexer.findImplementations'
-] as const;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Fast Symbol Indexer');
@@ -138,11 +135,25 @@ export function activate(context: vscode.ExtensionContext): void {
     await rebuildIndex(coordinator);
   }));
 
-  for (const command of STUB_COMMANDS) {
-    context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
-      void vscode.window.showInformationMessage(`${command} is not implemented yet.`);
-    }));
-  }
+  context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.findUsages', async () => {
+    await findUsages(textIndex, async () => {
+      if (initialFileIndexBuildPending) {
+        void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+      }
+
+      await initialFileIndexBuild;
+    });
+  }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.findImplementations', async () => {
+    await findImplementations(symbolIndex, async () => {
+      if (initialFileIndexBuildPending) {
+        void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+      }
+
+      await initialFileIndexBuild;
+    });
+  }));
 
   const watcher = vscode.workspace.createFileSystemWatcher('**/*');
   context.subscriptions.push(
