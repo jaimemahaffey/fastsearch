@@ -5,12 +5,17 @@ import type { FileRecord } from '../shared/types';
 export class FileIndex {
   private readonly entries = new Map<string, FileRecord>();
 
+  isEmpty(): boolean {
+    return this.entries.size === 0;
+  }
+
   upsert(relativePath: string, uri: string): void {
     this.entries.set(relativePath, {
       relativePath,
       uri,
       basename: path.basename(relativePath),
       extension: path.extname(relativePath),
+      // Kept for upcoming token-based matching so we do not need to rescan metadata later.
       tokens: relativePath.toLowerCase().split(/[\\/._-]+/)
     });
   }
