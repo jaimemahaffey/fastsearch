@@ -118,7 +118,76 @@ suite('extension activation', () => {
       const commandPromise = Promise.resolve(goToFileCommand?.());
       await Promise.resolve();
 
-      assert.equal(infoMessage, 'Building initial file index. Please wait a moment.');
+      assert.equal(infoMessage, 'Building initial indexes. Please wait a moment.');
+      assert.equal(showInputBoxCalls, 0);
+
+      resolveFindFiles?.([vscode.Uri.file('c:\\workspace\\src\\app\\main.ts')]);
+      await commandPromise;
+    } finally {
+      restoreProperty(outputPatch);
+      restoreProperty(infoPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(inputPatch);
+    }
+  });
+
+  test('shows a warming notice before waiting for the initial text index build', async () => {
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    let infoMessage: string | undefined;
+    let resolveFindFiles: ((files: vscode.Uri[]) => void) | undefined;
+    let showInputBoxCalls = 0;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const infoPatch = patchProperty(vscode.window, 'showInformationMessage', (async (message: string) => {
+      infoMessage = message;
+      return undefined;
+    }) as typeof vscode.window.showInformationMessage);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => {
+        registeredCommands.delete(command);
+      });
+    }) as typeof vscode.commands.registerCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', ((() => new Promise<vscode.Uri[]>((resolve) => {
+      resolveFindFiles = resolve;
+    })) as unknown) as typeof vscode.workspace.findFiles);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      return typeof pathOrUri === 'string' ? pathOrUri : 'src/app/main.ts';
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', ((uri: vscode.Uri) => ({
+      uri: vscode.Uri.file('c:\\workspace'),
+      index: 0,
+      name: 'workspace'
+    })) as typeof vscode.workspace.getWorkspaceFolder);
+    const inputPatch = patchProperty(vscode.window, 'showInputBox', (async () => {
+      showInputBoxCalls += 1;
+      return undefined;
+    }) as typeof vscode.window.showInputBox);
+
+    try {
+      activate({
+        subscriptions: []
+      } as unknown as vscode.ExtensionContext);
+
+      const goToTextCommand = registeredCommands.get('fastIndexer.goToText');
+      assert.ok(goToTextCommand, 'goToText command should be registered');
+
+      const commandPromise = Promise.resolve(goToTextCommand?.());
+      await Promise.resolve();
+
+      assert.equal(infoMessage, 'Building initial indexes. Please wait a moment.');
       assert.equal(showInputBoxCalls, 0);
 
       resolveFindFiles?.([vscode.Uri.file('c:\\workspace\\src\\app\\main.ts')]);

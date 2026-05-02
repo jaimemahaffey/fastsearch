@@ -6,6 +6,8 @@ export type TextMatch = {
   preview: string;
 };
 
+const MAX_TEXT_SEARCH_RESULTS = 200;
+
 export class TextIndex {
   private readonly contents = new Map<string, { uri: string; content: string }>();
 
@@ -18,13 +20,21 @@ export class TextIndex {
   }
 
   search(query: string): TextMatch[] {
-    const needle = query.toLowerCase();
+    const needle = query.trim().toLowerCase();
+    if (!needle) {
+      return [];
+    }
+
     const results: TextMatch[] = [];
 
     for (const [relativePath, entry] of this.contents) {
       const { uri, content } = entry;
       const lines = content.split(/\r?\n/);
       lines.forEach((line, index) => {
+        if (results.length >= MAX_TEXT_SEARCH_RESULTS) {
+          return;
+        }
+
         const column = line.toLowerCase().indexOf(needle);
         if (column >= 0) {
           results.push({
@@ -36,6 +46,10 @@ export class TextIndex {
           });
         }
       });
+
+      if (results.length >= MAX_TEXT_SEARCH_RESULTS) {
+        break;
+      }
     }
 
     return results;

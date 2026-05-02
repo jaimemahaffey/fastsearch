@@ -7,6 +7,7 @@ import { TextIndex } from './indexes/textIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 
 const WORKSPACE_FILE_EXCLUDE_GLOB = '**/{node_modules,.git,.hg,.svn,dist,build,coverage,out,target}/**';
+const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a moment.';
 
 const STUB_COMMANDS = [
   'fastIndexer.goToSymbol',
@@ -29,7 +30,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.goToFile', async () => {
     if (initialFileIndexBuildPending) {
-      void vscode.window.showInformationMessage('Building initial file index. Please wait a moment.');
+      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
     }
 
     await initialFileIndexBuild;
@@ -38,7 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.goToText', async () => {
     if (initialFileIndexBuildPending) {
-      void vscode.window.showInformationMessage('Building initial file index. Please wait a moment.');
+      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
     }
 
     await initialFileIndexBuild;
