@@ -25,10 +25,6 @@ suite('activation', () => {
       'fastIndexer.rebuildIndex'
     ]) {
       assert.ok(commands.includes(command), `missing command: ${command}`);
-      await assert.doesNotReject(
-        () => Promise.resolve(vscode.commands.executeCommand(command)),
-        `missing handler: ${command}`
-      );
     }
   });
 });

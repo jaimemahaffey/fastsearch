@@ -8,9 +8,11 @@ export type FastIndexerConfig = {
 
 export function readConfig(): FastIndexerConfig {
   const config = vscode.workspace.getConfiguration('fastIndexer');
+  const maxFileSizeKb = Math.max(0, config.get<number>('maxFileSizeKb', 512));
+
   return {
     enabled: config.get<boolean>('enabled', true),
-    maxFileSizeKb: config.get<number>('maxFileSizeKb', 512),
+    maxFileSizeKb,
     debounceMs: config.get<number>('debounceMs', 150)
   };
 }
