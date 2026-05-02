@@ -1,5 +1,6 @@
 export function isEligibleTextFile(relativePath: string, byteLength: number, maxFileSizeKb: number): boolean {
-  if (relativePath.includes('/node_modules/') || relativePath.includes('\\node_modules\\')) {
+  const pathSegments = relativePath.replace(/\\/g, '/').split('/');
+  if (pathSegments.includes('node_modules')) {
     return false;
   }
 

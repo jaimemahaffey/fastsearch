@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { TextIndex } from '../../indexes/textIndex';
+import { isEligibleTextFile } from '../../shared/fileEligibility';
 
 suite('TextIndex', () => {
   test('returns preview snippets and 1-based line numbers', () => {
@@ -16,5 +17,9 @@ suite('TextIndex', () => {
     assert.equal(results.length, 1);
     assert.equal(results[0]?.line, 2);
     assert.match(results[0]?.preview ?? '', /beta = alpha/);
+  });
+
+  test('rejects root-level node_modules files from text indexing eligibility', () => {
+    assert.equal(isEligibleTextFile('node_modules/foo.ts', 128, 1), false);
   });
 });
