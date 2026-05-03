@@ -13,6 +13,10 @@ export type SymbolRecord = {
 export class SymbolIndex {
   private readonly byFile = new Map<string, SymbolRecord[]>();
 
+  all(): SymbolRecord[] {
+    return [...this.byFile.values()].flat();
+  }
+
   isEmpty(): boolean {
     return this.byFile.size === 0 || [...this.byFile.values()].every((symbols) => symbols.length === 0);
   }

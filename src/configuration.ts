@@ -8,6 +8,10 @@ export type FastIndexerConfig = {
   debounceMs: number;
   symbolFallback: boolean;
   providerFallback: boolean;
+  fuzzySearch: boolean;
+  completionStyleResults: boolean;
+  useRipgrep: boolean;
+  useFzf: boolean;
 };
 
 const REBUILD_KEYS = new Set([
@@ -30,7 +34,11 @@ export function readConfig(): FastIndexerConfig {
     maxFileSizeKb,
     debounceMs: Math.max(0, config.get<number>('debounceMs', 150)),
     symbolFallback: config.get<boolean>('symbolFallback', true),
-    providerFallback: config.get<boolean>('providerFallback', true)
+    providerFallback: config.get<boolean>('providerFallback', true),
+    fuzzySearch: config.get<boolean>('fuzzySearch', true),
+    completionStyleResults: config.get<boolean>('completionStyleResults', true),
+    useRipgrep: config.get<boolean>('useRipgrep', true),
+    useFzf: config.get<boolean>('useFzf', false)
   };
 }
 

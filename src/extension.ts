@@ -189,7 +189,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await goToFile(fileIndex);
+    await goToFile(fileIndex, getConfig());
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.goToText', async () => {
@@ -207,7 +207,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await goToText(textIndex);
+    await goToText(textIndex, getConfig());
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.goToSymbol', async () => {
@@ -225,7 +225,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await goToSymbol(symbolIndex);
+    await goToSymbol(symbolIndex, getConfig());
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.rebuildIndex', async () => {
@@ -253,6 +253,9 @@ export function activate(context: vscode.ExtensionContext): void {
     await findUsages(textIndex, symbolIndex, {
       allowTextFallback: allowFallback,
       allowSymbolFallback: allowFallback && currentConfig.symbolFallback,
+      completionStyleResults: currentConfig.completionStyleResults,
+      fuzzySearch: currentConfig.fuzzySearch,
+      useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowFallback
           ? async () => {
             if (initialFileIndexBuildPending) {
@@ -280,6 +283,9 @@ export function activate(context: vscode.ExtensionContext): void {
     const allowSymbolFallback = currentConfig.enabled && currentConfig.providerFallback && currentConfig.symbolFallback;
     await findImplementations(symbolIndex, {
       allowSymbolFallback,
+      completionStyleResults: currentConfig.completionStyleResults,
+      fuzzySearch: currentConfig.fuzzySearch,
+      useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowSymbolFallback
           ? async () => {
             if (initialFileIndexBuildPending) {

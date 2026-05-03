@@ -92,6 +92,26 @@
           "type": "boolean",
           "default": true,
           "description": "Allow local index fallbacks when language providers cannot return usage or implementation results."
+        },
+        "fastIndexer.fuzzySearch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable fuzzy-ranked matching for fast indexer command queries."
+        },
+        "fastIndexer.completionStyleResults": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable completion-style result narrowing and presentation in fast indexer commands."
+        },
+        "fastIndexer.useRipgrep": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow fast indexer commands to use ripgrep as an optional external search provider when available."
+        },
+        "fastIndexer.useFzf": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow fast indexer commands to use fzf as an optional interactive narrowing provider when available."
         }
       }
     }

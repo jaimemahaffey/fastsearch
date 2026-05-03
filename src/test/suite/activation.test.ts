@@ -43,5 +43,9 @@ suite('activation', () => {
     assert.ok(properties['fastIndexer.exclude']);
     assert.ok(properties['fastIndexer.symbolFallback']);
     assert.ok(properties['fastIndexer.providerFallback']);
+    assert.ok(properties['fastIndexer.fuzzySearch']);
+    assert.ok(properties['fastIndexer.completionStyleResults']);
+    assert.ok(properties['fastIndexer.useRipgrep']);
+    assert.ok(properties['fastIndexer.useFzf']);
   });
 });

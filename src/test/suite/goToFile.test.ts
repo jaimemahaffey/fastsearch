@@ -2,6 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import { goToFile } from '../../commands/goToFile';
 import { FileIndex } from '../../indexes/fileIndex';
+import { FakeQuickPick } from './helpers/fakeQuickPick';
 import { patchProperty, restoreProperty } from './helpers/propertyPatch';
 
 suite('goToFile', () => {
@@ -20,7 +21,7 @@ suite('goToFile', () => {
     }) as typeof vscode.window.showInputBox);
 
     try {
-      await goToFile(index);
+      await goToFile(index, { completionStyleResults: false, fuzzySearch: true });
     } finally {
       restoreProperty(infoPatch);
       restoreProperty(inputPatch);
@@ -56,7 +57,7 @@ suite('goToFile', () => {
     }) as typeof vscode.window.showTextDocument);
 
     try {
-      await goToFile(index);
+      await goToFile(index, { completionStyleResults: false, fuzzySearch: true });
     } finally {
       restoreProperty(inputPatch);
       restoreProperty(pickPatch);
@@ -87,7 +88,7 @@ suite('goToFile', () => {
     }) as unknown) as typeof vscode.window.showQuickPick);
 
     try {
-      await goToFile(index);
+      await goToFile(index, { completionStyleResults: false, fuzzySearch: true });
     } finally {
       restoreProperty(inputPatch);
       restoreProperty(infoPatch);
@@ -96,5 +97,95 @@ suite('goToFile', () => {
 
     assert.equal(quickPickShown, false);
     assert.equal(infoMessage, 'No indexed files matched "missing".');
+  });
+
+  test('uses a completion-style picker that narrows fuzzy-ranked file results', async () => {
+    const index = new FileIndex();
+    index.upsert('src/app/go-to-file.ts', vscode.Uri.file('c:\\workspace\\src\\app\\go-to-file.ts').toString());
+    index.upsert('src/app/go-to-text.ts', vscode.Uri.file('c:\\workspace\\src\\app\\go-to-text.ts').toString());
+
+    const quickPick = new FakeQuickPick<vscode.QuickPickItem & { entry: { relativePath: string; uri: string; }; }>();
+    let openedUri: string | undefined;
+    let documentShown = false;
+
+    const pickerPatch = patchProperty(vscode.window, 'createQuickPick', ((() => quickPick) as unknown) as typeof vscode.window.createQuickPick);
+    const openPatch = patchProperty(vscode.workspace, 'openTextDocument', ((async (uri: vscode.Uri) => {
+      openedUri = uri.toString();
+      return { uri } as vscode.TextDocument;
+    }) as unknown) as typeof vscode.workspace.openTextDocument);
+    const showPatch = patchProperty(vscode.window, 'showTextDocument', (async () => {
+      documentShown = true;
+      return {} as vscode.TextEditor;
+    }) as typeof vscode.window.showTextDocument);
+
+    try {
+      await goToFile(index, { completionStyleResults: true, fuzzySearch: true });
+
+      assert.equal(quickPick.showed, true);
+      assert.deepEqual(quickPick.items.map((item) => item.label), [
+        'go-to-file.ts',
+        'go-to-text.ts'
+      ]);
+
+      const narrowedItems = quickPick.waitForItemsUpdate();
+      quickPick.fireChangeValue('gtf');
+      await narrowedItems;
+
+      assert.deepEqual(quickPick.items.map((item) => item.label), ['go-to-file.ts']);
+      assert.equal(quickPick.items[0]?.description, 'src/app/go-to-file.ts');
+      assert.equal(quickPick.items[0]?.detail, 'Indexed file');
+
+      quickPick.selectedItems = [quickPick.items[0]!];
+      quickPick.fireAccept();
+      await Promise.resolve();
+      await Promise.resolve();
+    } finally {
+      restoreProperty(pickerPatch);
+      restoreProperty(openPatch);
+      restoreProperty(showPatch);
+    }
+
+    assert.equal(openedUri, vscode.Uri.file('c:\\workspace\\src\\app\\go-to-file.ts').toString());
+    assert.equal(documentShown, true);
+    assert.equal(quickPick.disposed, true);
+  });
+
+  test('uses fzf to refine completion-style file results without replacing Quick Pick', async () => {
+    const index = new FileIndex();
+    index.upsert('src/app/go-to-file.ts', vscode.Uri.file('c:\\workspace\\src\\app\\go-to-file.ts').toString());
+    index.upsert('src/app/go-to-text.ts', vscode.Uri.file('c:\\workspace\\src\\app\\go-to-text.ts').toString());
+
+    const quickPick = new FakeQuickPick<vscode.QuickPickItem & { entry: { relativePath: string; uri: string; }; }>();
+    const pickerPatch = patchProperty(vscode.window, 'createQuickPick', ((() => quickPick) as unknown) as typeof vscode.window.createQuickPick);
+
+    try {
+      await goToFile(
+        index,
+        { completionStyleResults: true, fuzzySearch: true, useFzf: true },
+        {
+          toolRunner: async () => ({
+            exitCode: 0,
+            stdout: [
+              '1\tgo to text src/app/go-to-text.ts',
+              '0\tgo to file src/app/go-to-file.ts'
+            ].join('\n'),
+            stderr: ''
+          })
+        }
+      );
+
+      assert.equal(quickPick.showed, true);
+
+      const narrowedItems = quickPick.waitForItemsUpdate();
+      quickPick.fireChangeValue('gt');
+      await narrowedItems;
+
+      assert.deepEqual(quickPick.items.map((item) => item.label), [
+        'go-to-text.ts',
+        'go-to-file.ts'
+      ]);
+    } finally {
+      restoreProperty(pickerPatch);
+    }
   });
 });

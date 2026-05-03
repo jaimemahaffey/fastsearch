@@ -16,7 +16,11 @@ suite('configuration', () => {
             maxFileSizeKb: -1,
             debounceMs: -5,
             symbolFallback: false,
-            providerFallback: false
+            providerFallback: false,
+            fuzzySearch: false,
+            completionStyleResults: false,
+            useRipgrep: false,
+            useFzf: true
           };
 
           return (values[key] ?? defaultValue) as T;
@@ -32,7 +36,11 @@ suite('configuration', () => {
         maxFileSizeKb: 0,
         debounceMs: 0,
         symbolFallback: false,
-        providerFallback: false
+        providerFallback: false,
+        fuzzySearch: false,
+        completionStyleResults: false,
+        useRipgrep: false,
+        useFzf: true
       });
     } finally {
       restoreProperty(configPatch);

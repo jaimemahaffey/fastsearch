@@ -4,6 +4,7 @@ import { findImplementations } from '../../commands/findImplementations';
 import { findUsages } from '../../commands/findUsages';
 import { SymbolIndex } from '../../indexes/symbolIndex';
 import { TextIndex } from '../../indexes/textIndex';
+import { FakeQuickPick } from './helpers/fakeQuickPick';
 import { patchProperty, restoreProperty, type RestorableProperty } from './helpers/propertyPatch';
 
 type QuickPickItem = {
@@ -69,12 +70,12 @@ suite('discoveryCommands', () => {
       {
         label: 'src/textMatch.ts:1',
         description: 'Approximate local match',
-        detail: textUri.toString()
+        detail: 'src/textMatch.ts'
       },
       {
         label: 'src/symbolMatch.ts:5',
         description: 'Approximate local match',
-        detail: symbolUri.toString()
+        detail: 'src/symbolMatch.ts'
       }
     ]);
   });
@@ -133,7 +134,7 @@ suite('discoveryCommands', () => {
       {
         label: 'src/provider.ts:3',
         description: 'Provider-backed match',
-        detail: providerUri.toString()
+        detail: 'src/provider.ts'
       }
     ]);
   });
@@ -187,9 +188,143 @@ suite('discoveryCommands', () => {
       {
         label: 'src/implementation.ts:8',
         description: 'Provider-backed match',
-        detail: implementationUri.toString()
+        detail: 'src/implementation.ts'
       }
     ]);
+  });
+
+  test('findUsages keeps provider-first results while allowing completion-style narrowing', async () => {
+    const textIndex = new TextIndex();
+    const symbolIndex = new SymbolIndex();
+    const providerAlphaUri = vscode.Uri.file('c:\\workspace\\src\\provider-alpha.ts');
+    const providerBetaUri = vscode.Uri.file('c:\\workspace\\src\\provider-beta.ts');
+    const quickPick = new FakeQuickPick<vscode.QuickPickItem & { description?: string; detail?: string; }>();
+    let awaitedFallback = false;
+
+    const patches = createCommandPatches({
+      activeEditor: createEditor('alpha', providerAlphaUri),
+      executeCommand: async (command) => {
+        if (command === 'vscode.executeReferenceProvider') {
+          return [
+            new vscode.Location(providerAlphaUri, new vscode.Range(2, 0, 2, 5)),
+            new vscode.Location(providerBetaUri, new vscode.Range(5, 0, 5, 5))
+          ];
+        }
+
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      asRelativePath: (resource) =>
+        isUriMatch(resource, providerAlphaUri) ? 'src/provider-alpha.ts' : 'src/provider-beta.ts',
+      showQuickPick: async () => undefined,
+      createQuickPick: ((() => quickPick) as unknown) as typeof vscode.window.createQuickPick
+    });
+
+    try {
+      await findUsages(textIndex, symbolIndex, {
+        completionStyleResults: true,
+        fuzzySearch: true,
+        awaitFallbackReady: async () => {
+          awaitedFallback = true;
+        }
+      });
+
+      assert.equal(quickPick.showed, true);
+      assert.deepEqual(quickPick.items.map((item) => item.label), [
+        'src/provider-alpha.ts:3',
+        'src/provider-beta.ts:6'
+      ]);
+
+      const narrowedItems = quickPick.waitForItemsUpdate();
+      quickPick.fireChangeValue('beta');
+      await narrowedItems;
+
+      assert.deepEqual(quickPick.items.map((item) => item.label), ['src/provider-beta.ts:6']);
+      assert.equal(quickPick.items[0]?.description, 'Provider-backed match');
+      assert.equal(quickPick.items[0]?.detail, 'src/provider-beta.ts');
+    } finally {
+      restorePatches(patches);
+    }
+
+    assert.equal(awaitedFallback, false);
+  });
+
+  test('findImplementations allows completion-style narrowing over fallback results', async () => {
+    const symbolIndex = new SymbolIndex();
+    const contractUri = vscode.Uri.file('c:\\workspace\\src\\contract.ts');
+    const implementationOneUri = vscode.Uri.file('c:\\workspace\\src\\impl-one.ts');
+    const implementationTwoUri = vscode.Uri.file('c:\\workspace\\src\\impl-two.ts');
+    symbolIndex.replaceForFile('src/impl-one.ts', [
+      {
+        name: 'alphaImplOne',
+        kind: vscode.SymbolKind.Class,
+        containerName: undefined,
+        uri: implementationOneUri.toString(),
+        startLine: 3,
+        startColumn: 0,
+        approximate: false
+      }
+    ]);
+    symbolIndex.replaceForFile('src/impl-two.ts', [
+      {
+        name: 'alphaImplTwo',
+        kind: vscode.SymbolKind.Class,
+        containerName: undefined,
+        uri: implementationTwoUri.toString(),
+        startLine: 8,
+        startColumn: 0,
+        approximate: false
+      }
+    ]);
+
+    const quickPick = new FakeQuickPick<vscode.QuickPickItem & { description?: string; detail?: string; }>();
+    let awaitedFallback = false;
+    const patches = createCommandPatches({
+      activeEditor: createEditor('alpha', contractUri),
+      executeCommand: async (command) => {
+        if (command === 'vscode.executeImplementationProvider') {
+          return [];
+        }
+
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      asRelativePath: (resource) => {
+        if (isUriMatch(resource, implementationOneUri)) {
+          return 'src/impl-one.ts';
+        }
+
+        return 'src/impl-two.ts';
+      },
+      showQuickPick: async () => undefined,
+      createQuickPick: ((() => quickPick) as unknown) as typeof vscode.window.createQuickPick
+    });
+
+    try {
+      await findImplementations(symbolIndex, {
+        completionStyleResults: true,
+        fuzzySearch: true,
+        awaitFallbackReady: async () => {
+          awaitedFallback = true;
+        }
+      });
+
+      assert.equal(quickPick.showed, true);
+      assert.deepEqual(quickPick.items.map((item) => item.label), [
+        'src/impl-one.ts:4',
+        'src/impl-two.ts:9'
+      ]);
+
+      const narrowedItems = quickPick.waitForItemsUpdate();
+      quickPick.fireChangeValue('two');
+      await narrowedItems;
+
+      assert.deepEqual(quickPick.items.map((item) => item.label), ['src/impl-two.ts:9']);
+      assert.equal(quickPick.items[0]?.description, 'Approximate local match');
+      assert.equal(quickPick.items[0]?.detail, 'src/impl-two.ts');
+    } finally {
+      restorePatches(patches);
+    }
+
+    assert.equal(awaitedFallback, true);
   });
 });
 
@@ -211,19 +346,29 @@ function createCommandPatches({
   activeEditor,
   executeCommand,
   asRelativePath,
-  showQuickPick
+  showQuickPick,
+  createQuickPick
 }: {
   activeEditor: vscode.TextEditor;
   executeCommand: (command: string, ...args: unknown[]) => Promise<unknown>;
   asRelativePath: (resource: string | vscode.Uri) => string;
   showQuickPick: (items: readonly QuickPickItem[]) => Promise<QuickPickItem | undefined>;
+  createQuickPick?: typeof vscode.window.createQuickPick;
 }): Array<RestorableProperty<object, never>> {
-  return [
+  const patches = [
     patchProperty(vscode.window, 'activeTextEditor', activeEditor as typeof vscode.window.activeTextEditor) as RestorableProperty<object, never>,
     patchProperty(vscode.commands, 'executeCommand', executeCommand as typeof vscode.commands.executeCommand) as RestorableProperty<object, never>,
     patchProperty(vscode.workspace, 'asRelativePath', asRelativePath as typeof vscode.workspace.asRelativePath) as RestorableProperty<object, never>,
     patchProperty(vscode.window, 'showQuickPick', (showQuickPick as unknown) as typeof vscode.window.showQuickPick) as RestorableProperty<object, never>
   ];
+
+  if (createQuickPick) {
+    patches.push(
+      patchProperty(vscode.window, 'createQuickPick', createQuickPick) as RestorableProperty<object, never>
+    );
+  }
+
+  return patches;
 }
 
 function restorePatches(patches: Array<RestorableProperty<object, never>>): void {

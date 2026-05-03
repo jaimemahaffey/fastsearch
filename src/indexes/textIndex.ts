@@ -1,4 +1,5 @@
 import type { DiscoveryResult } from '../commands/findUsages';
+import { scoreCandidate } from '../shared/matchScore';
 
 export type TextMatch = {
   relativePath: string;
@@ -59,6 +60,62 @@ export class TextIndex {
     }
 
     return results;
+  }
+
+  searchForCommand(query: string, fuzzySearch: boolean): TextMatch[] {
+    const needle = query.trim().toLowerCase();
+    if (!needle) {
+      return [];
+    }
+
+    const rankedResults: Array<{ match: TextMatch; score: number; }> = [];
+
+    for (const [relativePath, entry] of this.contents) {
+      const { uri, content } = entry;
+      const lines = content.split(/\r?\n/);
+
+      lines.forEach((line, index) => {
+        if (rankedResults.length >= MAX_TEXT_SEARCH_RESULTS) {
+          return;
+        }
+
+        const substringColumn = line.toLowerCase().indexOf(needle);
+        const score = fuzzySearch
+          ? Math.max(
+            scoreCandidate(query, line),
+            scoreCandidate(query, `${relativePath} ${line}`),
+            scoreCandidate(query, relativePath)
+          )
+          : (substringColumn >= 0 ? 150 : -1);
+
+        if (score < 0) {
+          return;
+        }
+
+        rankedResults.push({
+          score,
+          match: {
+            relativePath,
+            uri,
+            line: index + 1,
+            column: substringColumn >= 0 ? substringColumn + 1 : 1,
+            preview: line.trim()
+          }
+        });
+      });
+
+      if (rankedResults.length >= MAX_TEXT_SEARCH_RESULTS) {
+        break;
+      }
+    }
+
+    return rankedResults
+      .sort((left, right) =>
+        right.score - left.score
+        || left.match.relativePath.localeCompare(right.match.relativePath)
+        || left.match.line - right.match.line
+      )
+      .map((entry) => entry.match);
   }
 
   findApproximateUsages(query: string): DiscoveryResult[] {

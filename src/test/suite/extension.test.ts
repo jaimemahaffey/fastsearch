@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { activate, readEligibleTextContent } from '../../extension';
+import { FakeQuickPick } from './helpers/fakeQuickPick';
 import { patchProperty, restoreProperty } from './helpers/propertyPatch';
 
 suite('extension activation', () => {
@@ -716,7 +717,7 @@ suite('extension activation', () => {
 
   test('keeps same-folder-name workspace entries distinct during the initial build', async () => {
     const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
-    let quickPickItems: readonly { description?: string; }[] | undefined;
+    const quickPick = new FakeQuickPick<vscode.QuickPickItem & { description?: string; }>();
     const firstFile = vscode.Uri.file('c:\\repos\\workspace\\src\\app\\main.ts');
     const secondFile = vscode.Uri.file('d:\\repos\\workspace\\src\\app\\main.ts');
 
@@ -745,11 +746,7 @@ suite('extension activation', () => {
       index: uri.fsPath.startsWith('c:') ? 0 : 1,
       name: 'workspace'
     })) as typeof vscode.workspace.getWorkspaceFolder);
-    const inputPatch = patchProperty(vscode.window, 'showInputBox', (async () => 'main') as typeof vscode.window.showInputBox);
-    const quickPickPatch = patchProperty(vscode.window, 'showQuickPick', ((async (items: readonly { description?: string; }[]) => {
-      quickPickItems = items;
-      return undefined;
-    }) as unknown) as typeof vscode.window.showQuickPick);
+    const quickPickPatch = patchProperty(vscode.window, 'createQuickPick', ((() => quickPick) as unknown) as typeof vscode.window.createQuickPick);
 
     try {
       activate({
@@ -766,12 +763,11 @@ suite('extension activation', () => {
       restoreProperty(findFilesPatch);
       restoreProperty(relativePatch);
       restoreProperty(workspaceFolderPatch);
-      restoreProperty(inputPatch);
       restoreProperty(quickPickPatch);
     }
 
-    assert.equal(quickPickItems?.length, 2);
-    assert.deepEqual(quickPickItems?.map((item) => item.description), [
+    assert.equal(quickPick.items.length, 2);
+    assert.deepEqual(quickPick.items.map((item) => item.description), [
       'workspace/src/app/main.ts',
       'workspace/src/app/main.ts'
     ]);

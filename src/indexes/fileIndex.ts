@@ -5,6 +5,10 @@ import type { FileRecord } from '../shared/types';
 export class FileIndex {
   private readonly entries = new Map<string, FileRecord>();
 
+  all(): FileRecord[] {
+    return [...this.entries.values()];
+  }
+
   isEmpty(): boolean {
     return this.entries.size === 0;
   }
