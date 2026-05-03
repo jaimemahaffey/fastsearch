@@ -36,6 +36,12 @@ The extension SHALL maintain a local workspace index that can be built initially
 - **THEN** the affected file entries are added, updated, moved, or removed from the relevant indexes
 - **AND** rapid event bursts are debounced or coalesced
 
+#### Scenario: Workspace composition changes
+
+- **WHEN** the set of workspace folders changes in a multi-root workspace
+- **THEN** the extension SHALL treat the resulting full workspace composition as the current workspace identity for lifecycle purposes
+- **AND** mark stale index state for rebuild against the current composition
+
 #### Scenario: Rebuild supersedes active indexing
 
 - **WHEN** `fastIndexer.rebuildIndex` is invoked while indexing is already running
@@ -110,7 +116,8 @@ The extension SHALL provide a focused usage-discovery command that prefers VS Co
 
 - **WHEN** `fastIndexer.findUsages` is invoked and no reference provider can provide results
 - **THEN** the extension MAY search the local text and symbol indexes for matching identifier candidates
-- **AND** presents fallback results as approximate matches
+- **AND** presents fallback results as approximate local matches
+- **AND** does not present those fallback results as semantically equivalent to provider-backed results
 
 ### Requirement: Find implementations
 
@@ -126,7 +133,8 @@ The extension SHALL provide a focused implementation-discovery command that pref
 
 - **WHEN** `fastIndexer.findImplementations` is invoked and no implementation provider can provide results
 - **THEN** the extension MAY search the local symbol index for implementation-like candidates
-- **AND** presents fallback results as approximate matches
+- **AND** presents fallback results as approximate local matches
+- **AND** does not present those fallback results as semantically equivalent to provider-backed results
 
 ### Requirement: Rebuild index command
 

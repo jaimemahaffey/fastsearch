@@ -15,8 +15,9 @@ This change is therefore being narrowed from a bootstrap “build the whole exte
 ## What Changes
 
 - Record that persistence is internal-only cache behavior, not a supported configurable feature of the base capability.
-- Clarify how multi-root workspaces are identified and handled by the base indexing lifecycle.
-- Clarify how approximate fallback results are described in the base capability language.
+- Define multi-root workspace identity in terms of the full current workspace composition rather than only the first folder.
+- Clarify that changing the workspace folder set should make the current in-memory index state stale and trigger rebuild behavior for the new composition.
+- Clarify that provider-backed results remain preferred and local fallback results are described explicitly as approximate local matches.
 - Align OpenSpec tasks and design notes with the fact that the core extension surface already exists.
 
 ## Out Of Scope
@@ -42,5 +43,5 @@ This change is therefore being narrowed from a bootstrap “build the whole exte
 
 - The change artifacts accurately describe what is still undecided about the base capability.
 - Persistence behavior is clearly documented as internal-only cache behavior rather than a supported public feature.
-- Multi-root workspace identity is defined clearly enough to guide future implementation and validation.
-- Approximate fallback behavior is described consistently across design and spec language.
+- Multi-root workspace identity is defined as the current full workspace composition and is clear enough to guide future implementation and validation.
+- Approximate fallback behavior is described consistently across design and spec language, with provider-backed results remaining the preferred semantic answer.

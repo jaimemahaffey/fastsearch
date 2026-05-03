@@ -12,10 +12,10 @@
 
 ## 3. Multi-root semantics
 
-- [ ] Decide how workspace identity should be defined for multi-root workspaces.
-- [ ] Clarify how cache and rebuild behavior should respond when the workspace folder set changes.
+- [x] Decide how workspace identity should be defined for multi-root workspaces.
+- [x] Clarify how cache and rebuild behavior should respond when the workspace folder set changes.
 
 ## 4. Validation and language
 
-- [ ] Clarify how approximate fallback results should be described in the base capability language.
-- [ ] Identify any tests or follow-on tasks that are needed once persistence and multi-root behavior are explicitly decided.
+- [x] Clarify how approximate fallback results should be described in the base capability language.
+- [x] Identify any tests or follow-on tasks that are needed once persistence and multi-root behavior are explicitly decided.

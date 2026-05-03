@@ -46,32 +46,48 @@ This keeps the base capability honest and avoids implying guarantees that the ex
 
 The extension already shows some awareness of multi-root workspaces, but the change artifacts do not clearly define what counts as “the workspace” for cache and lifecycle purposes.
 
-The design needs to answer:
+### Decision
 
-- Is identity based on the first workspace folder?
-- Is identity based on the full ordered set of workspace folders?
-- Is identity based on the `.code-workspace` file when one exists?
-- What should happen when the set of folders changes?
+Workspace identity should be treated as a property of the **entire current workspace composition**, not only the first folder.
 
-### Current Lean
+For design purposes that means:
 
-The most future-proof answer is to treat workspace identity as a property of the **entire workspace composition**, not only the first folder.
+- if a `.code-workspace` file is the authoritative workspace container, its identity can anchor the composition,
+- otherwise identity should be derived from the ordered set of current workspace folder URIs,
+- and two workspaces with the same first folder but different overall folder sets should not be treated as the same cache or lifecycle identity.
 
-Even if the current implementation remains simpler for now, the design should make the intended semantics explicit.
+### Workspace Folder Set Changes
+
+When the workspace folder set changes, the extension should treat the resulting composition as a new effective workspace for lifecycle purposes.
+
+Because persistence is internal-only cache behavior:
+
+- prior cache state does not need compatibility guarantees across different workspace compositions,
+- in-memory indexes should be considered stale when the composition changes,
+- and rebuild behavior should prefer correctness for the current composition over reuse of stale state.
 
 ## 3. Approximate-Result Language
 
 The base capability already prefers semantic provider results where available and falls back to local index approximations when needed.
 
-What remains is not the mechanism but the language:
+### Decision
 
-- when should fallback results be shown,
-- how visibly should they be marked,
-- and how should the base capability describe the difference between semantic and approximate answers?
+The language should stay explicit:
 
-### Current Lean
+- provider results are the preferred semantic answer when available,
+- fallback results should be described as **approximate local matches**,
+- and the base capability should never imply that local fallback results have the same semantic certainty as provider-backed results.
 
-Keep the distinction explicit wherever fallback results are shown. The base capability should avoid overstating semantic confidence.
+This keeps the UX honest while still allowing the local index to provide useful degraded behavior.
+
+## 4. Validation And Follow-On Work
+
+The remaining follow-on work should focus on the newly-set semantics rather than re-opening the already-shipped core capability.
+
+- Add or adjust tests around workspace identity derivation if the implementation moves from first-folder identity to full-workspace-composition identity.
+- Add validation that workspace folder set changes mark index state stale and trigger rebuild behavior for the new composition.
+- Keep approximate-result copy aligned with the existing provider-backed vs approximate-local labeling in command-search and discovery flows.
+- If persistence later becomes user-visible, open a separate change for settings, guarantees, migration, and compatibility expectations rather than expanding this narrowed base change.
 
 ## Relationship To Other Changes
 
@@ -91,5 +107,4 @@ Those changes extend the base capability, but they should remain separate in Ope
 
 ## Open Questions
 
-- What exact workspace identity model should the base capability promise?
-- Does the spec need stronger language around how approximate fallback results are labeled?
+- Does the implementation need to move beyond first-folder workspace identity immediately, or can the design lead the code until a follow-on implementation pass is scheduled?
