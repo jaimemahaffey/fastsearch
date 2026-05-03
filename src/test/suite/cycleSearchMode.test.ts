@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { PersistenceStore } from '../../core/persistenceStore';
 import { activate } from '../../extension';
 import { FakeQuickPick } from './helpers/fakeQuickPick';
 import { patchProperty, restoreProperty } from './helpers/propertyPatch';
@@ -26,6 +27,8 @@ async function activateWithCycleHarness(
   const quickPickQueue = [...quickPicks];
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fastsearch-cycle-'));
   const tempFile = path.join(tempRoot, 'src', 'app', 'main.ts');
+  const workspaceUri = vscode.Uri.file(tempRoot);
+  const tempFileUri = vscode.Uri.file(tempFile);
   fs.mkdirSync(path.dirname(tempFile), { recursive: true });
   fs.writeFileSync(tempFile, 'const alpha = beta;\n', 'utf8');
   const patches = [
@@ -75,13 +78,13 @@ async function activateWithCycleHarness(
       };
     }) as unknown) as typeof vscode.workspace.getConfiguration),
     patchProperty(vscode.workspace, 'findFiles', (async () => [
-      vscode.Uri.file(tempFile)
+      tempFileUri
     ]) as typeof vscode.workspace.findFiles),
     patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
       return typeof pathOrUri === 'string' ? pathOrUri : 'src/app/main.ts';
     }) as typeof vscode.workspace.asRelativePath),
     patchProperty(vscode.workspace, 'getWorkspaceFolder', ((uri: vscode.Uri) => ({
-      uri: vscode.Uri.file(tempRoot),
+      uri: workspaceUri,
       index: 0,
       name: 'workspace'
     })) as typeof vscode.workspace.getWorkspaceFolder),
@@ -94,6 +97,52 @@ async function activateWithCycleHarness(
     patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
       return new vscode.Disposable(() => undefined);
     }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration),
+    patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => ({
+        metadata: {
+          schemaVersion: 1,
+          workspaceId: encodeURIComponent(workspaceUri.toString()),
+          configHash: JSON.stringify({
+            include: ['**/*'],
+            exclude: [],
+            maxFileSizeKb: 512
+          })
+        },
+        fileIndex: [{
+          relativePath: 'src/app/main.ts',
+          uri: tempFileUri.toString(),
+          basename: 'main.ts',
+          extension: '.ts',
+          tokens: ['src', 'app', 'main', 'ts']
+        }],
+        textIndex: [{
+          relativePath: 'src/app/main.ts',
+          uri: tempFileUri.toString(),
+          content: 'const alpha = beta;\n'
+        }],
+        symbolIndex: [{
+          relativePath: 'src/app/main.ts',
+          symbols: options.symbolsAvailable === false
+            ? []
+            : [{
+              name: 'AlphaService',
+              kind: vscode.SymbolKind.Class,
+              containerName: undefined,
+              uri: tempFileUri.toString(),
+              startLine: 1,
+              startColumn: 2,
+              approximate: false
+            }]
+        }]
+      })) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    ),
+    patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    ),
     patchProperty(vscode.commands, 'executeCommand', (async <T>(command: string) => {
       if (command === 'vscode.executeDocumentSymbolProvider') {
         if (options.symbolsAvailable === false) {

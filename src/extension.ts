@@ -9,7 +9,7 @@ import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
-import { PersistenceStore } from './core/persistenceStore';
+import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
 import { FileIndex } from './indexes/fileIndex';
 import { SymbolIndex } from './indexes/symbolIndex';
@@ -22,6 +22,7 @@ const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
 const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
+const PERSISTENCE_SCHEMA_VERSION = 1;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Fast Symbol Indexer');
@@ -35,7 +36,24 @@ export function activate(context: vscode.ExtensionContext): void {
   let buildGeneration = 0;
   const buildWorkspace = async () => {
     const generation = ++buildGeneration;
-    return buildWorkspaceIndexes(fileIndex, symbolIndex, textIndex, getConfig(), output, () => getConfig().enabled && generation === buildGeneration);
+    const currentConfig = getConfig();
+    const completed = await buildWorkspaceIndexes(
+      fileIndex,
+      symbolIndex,
+      textIndex,
+      currentConfig,
+      output,
+      () => getConfig().enabled && generation === buildGeneration
+    );
+
+    if (completed !== false && getConfig().enabled) {
+      await persistenceStore.writeWorkspaceSnapshot(
+        workspacePersistence.workspaceId,
+        createPersistedWorkspaceSnapshot(workspacePersistence, currentConfig, fileIndex, symbolIndex, textIndex)
+      );
+    }
+
+    return completed;
   };
   const coordinator = new IndexCoordinator({
     clearIndexes: () => {
@@ -51,6 +69,9 @@ export function activate(context: vscode.ExtensionContext): void {
   let rebuildInFlight = false;
   let rebuildTimeout: NodeJS.Timeout | undefined;
   let initialIndexPromise: Promise<void> = Promise.resolve();
+  let initialSnapshotRestorePending = false;
+  let initialSnapshotPromise: Promise<void> = Promise.resolve();
+  let restoredSnapshotReady = false;
   let initialBuildToken = 0;
 
   const runQueuedRebuild = (): void => {
@@ -137,7 +158,27 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const startInitialBuild = (): void => {
     coordinator.markWarming();
-    beginBuildGate(buildWorkspace);
+    restoredSnapshotReady = false;
+    initialSnapshotRestorePending = true;
+    initialSnapshotPromise = restorePersistedSnapshot(
+      persistenceStore,
+      workspacePersistence,
+      getConfig(),
+      fileIndex,
+      symbolIndex,
+      textIndex
+    )
+      .then((restored) => {
+        restoredSnapshotReady = restored;
+      })
+      .catch((error) => {
+        restoredSnapshotReady = false;
+        output.appendLine(`Failed to restore persisted workspace snapshot: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        initialSnapshotRestorePending = false;
+        beginBuildGate(buildWorkspace);
+      });
   };
 
   const startConfigRebuild = (): void => {
@@ -153,6 +194,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const waitForCurrentBuild = async (): Promise<boolean> => {
+    if (initialSnapshotRestorePending) {
+      await initialSnapshotPromise;
+    }
+
     while (initialFileIndexBuildPending) {
       const token = initialBuildToken;
       await initialIndexPromise;
@@ -162,6 +207,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     return getConfig().enabled;
+  };
+
+  const waitForInitialSnapshotRestore = async (): Promise<void> => {
+    if (initialSnapshotRestorePending) {
+      await initialSnapshotPromise;
+    }
   };
 
   if (config.enabled) {
@@ -182,11 +233,13 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    if (initialFileIndexBuildPending) {
+    await waitForInitialSnapshotRestore();
+
+    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
       void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
     }
 
-    if (!await waitForCurrentBuild()) {
+    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -201,11 +254,13 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    if (initialFileIndexBuildPending) {
+    await waitForInitialSnapshotRestore();
+
+    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
       void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
     }
 
-    if (!await waitForCurrentBuild()) {
+    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -220,11 +275,13 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    if (initialFileIndexBuildPending) {
+    await waitForInitialSnapshotRestore();
+
+    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
       void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
     }
 
-    if (!await waitForCurrentBuild()) {
+    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -239,11 +296,13 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    if (initialFileIndexBuildPending) {
+    await waitForInitialSnapshotRestore();
+
+    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
       void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
     }
 
-    if (!await waitForCurrentBuild()) {
+    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -460,6 +519,77 @@ export async function readEligibleTextContent(
   return Buffer.from(bytes).toString('utf8');
 }
 
+async function restorePersistedSnapshot(
+  persistenceStore: PersistenceStore,
+  workspacePersistence: WorkspacePersistence,
+  config: FastIndexerConfig,
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex
+): Promise<boolean> {
+  try {
+    const snapshot = await persistenceStore.readWorkspaceSnapshot(workspacePersistence.workspaceId);
+    if (!snapshot) {
+      return false;
+    }
+
+    if (!isPersistedSnapshotValid(snapshot, workspacePersistence, config)) {
+      await persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId);
+      return false;
+    }
+
+    hydrateIndexesFromSnapshot(snapshot, fileIndex, symbolIndex, textIndex);
+    return true;
+  } catch (error) {
+    await persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId);
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+function hydrateIndexesFromSnapshot(
+  snapshot: PersistedWorkspaceSnapshot,
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex
+): void {
+  fileIndex.clear();
+  symbolIndex.clear();
+  textIndex.clear();
+
+  snapshot.fileIndex.forEach((entry) => {
+    fileIndex.upsert(entry.relativePath, entry.uri, toIndexedSnapshotKey(entry));
+  });
+  snapshot.textIndex.forEach((entry) => {
+    textIndex.upsert(entry.relativePath, entry.uri, entry.content);
+  });
+  snapshot.symbolIndex.forEach((entry) => {
+    symbolIndex.replaceForFile(entry.relativePath, entry.symbols);
+  });
+}
+
+function createPersistedWorkspaceSnapshot(
+  workspacePersistence: WorkspacePersistence,
+  config: FastIndexerConfig,
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex
+): PersistedWorkspaceSnapshot {
+  return {
+    metadata: {
+      schemaVersion: PERSISTENCE_SCHEMA_VERSION,
+      workspaceId: workspacePersistence.workspaceId,
+      configHash: createPersistenceConfigHash(config)
+    },
+    fileIndex: fileIndex.all(),
+    textIndex: textIndex.allContents(),
+    symbolIndex: symbolIndex.allByFile()
+  };
+}
+
 function toIndexedFileKey(file: vscode.Uri, relativePath: string): string {
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(file);
   if (!workspaceFolder) {
@@ -469,10 +599,52 @@ function toIndexedFileKey(file: vscode.Uri, relativePath: string): string {
   return `${workspaceFolder.uri.toString()}::${relativePath}`;
 }
 
+function toIndexedSnapshotKey(entry: PersistedWorkspaceSnapshot['fileIndex'][number]): string {
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(entry.uri));
+  if (!workspaceFolder) {
+    return entry.relativePath;
+  }
+
+  return `${workspaceFolder.uri.toString()}::${entry.relativePath}`;
+}
+
+function createPersistenceConfigHash(config: FastIndexerConfig): string {
+  return JSON.stringify({
+    include: config.include,
+    exclude: config.exclude,
+    maxFileSizeKb: config.maxFileSizeKb
+  });
+}
+
+function isPersistedSnapshotValid(
+  snapshot: PersistedWorkspaceSnapshot,
+  workspacePersistence: WorkspacePersistence,
+  config: FastIndexerConfig
+): boolean {
+  return snapshot.metadata.schemaVersion === PERSISTENCE_SCHEMA_VERSION
+    && snapshot.metadata.workspaceId === workspacePersistence.workspaceId
+    && snapshot.metadata.configHash === createPersistenceConfigHash(config);
+}
+
 function getWorkspacePersistence(): WorkspacePersistence {
-  const primaryWorkspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  const workspaceFolderUris = (vscode.workspace.workspaceFolders ?? [])
+    .map((workspaceFolder) => workspaceFolder.uri.toString())
+    .sort();
+
+  if (workspaceFolderUris.length === 0) {
+    return {
+      workspaceId: 'workspace'
+    };
+  }
+
+  if (workspaceFolderUris.length === 1) {
+    return {
+      workspaceId: encodeURIComponent(workspaceFolderUris[0]!)
+    };
+  }
+
   return {
-    workspaceId: primaryWorkspaceFolder ? encodeURIComponent(primaryWorkspaceFolder.uri.toString()) : 'workspace'
+    workspaceId: encodeURIComponent(JSON.stringify(workspaceFolderUris))
   };
 }
 

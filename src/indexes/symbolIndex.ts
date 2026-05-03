@@ -13,6 +13,13 @@ export type SymbolRecord = {
 export class SymbolIndex {
   private readonly byFile = new Map<string, SymbolRecord[]>();
 
+  allByFile(): Array<{ relativePath: string; symbols: SymbolRecord[]; }> {
+    return [...this.byFile.entries()].map(([relativePath, symbols]) => ({
+      relativePath,
+      symbols: [...symbols]
+    }));
+  }
+
   all(): SymbolRecord[] {
     return [...this.byFile.values()].flat();
   }
