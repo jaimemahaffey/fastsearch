@@ -65,11 +65,14 @@ suite('activation', () => {
       commands.some((contribution: { command?: string; }) => contribution.command === 'fastIndexer.cycleSearchMode'),
       'expected fastIndexer.cycleSearchMode command contribution'
     );
-    assert.ok(
-      keybindings.some((binding: { command?: string; key?: string; }) =>
-        binding.command === 'fastIndexer.cycleSearchMode' && binding.key === 'ctrl+t'
-      ),
-      'expected Ctrl+T keybinding for fastIndexer.cycleSearchMode'
+    const cycleBindings = keybindings.filter((binding: { command?: string; key?: string; when?: string; }) =>
+      binding.command === 'fastIndexer.cycleSearchMode' && binding.key === 'ctrl+t'
+    );
+
+    assert.deepEqual(
+      cycleBindings.map((binding: { when?: string; }) => binding.when).sort(),
+      ['editorTextFocus', 'inQuickOpen', 'terminalFocus'],
+      'expected Ctrl+T bindings for editor, quick open, and terminal focus'
     );
   });
 });
