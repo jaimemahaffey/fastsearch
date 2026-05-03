@@ -26,6 +26,7 @@ export type CommandSearchProvider<TContext> = {
 };
 
 export type CommandSearchPresentationOptions = {
+  title?: string;
   placeholder: string;
   noResultsMessage: (query: string) => string;
   completionStyleResults: boolean;
@@ -36,11 +37,17 @@ export type CommandSearchPresentationOptions = {
   ) => CommandSearchCandidate[] | Promise<CommandSearchCandidate[]>;
   toItem: (candidate: CommandSearchCandidate) => vscode.QuickPickItem;
   onDidAccept: (candidate: CommandSearchCandidate) => Promise<void>;
+  onDidHide?: () => void;
 };
 
 type CommandSearchPickItem = vscode.QuickPickItem & {
   candidate: CommandSearchCandidate;
 };
+
+let activeCommandSearchQuickPick: {
+  quickPick: vscode.QuickPick<CommandSearchPickItem>;
+  suppressHideHandler: boolean;
+} | undefined;
 
 export function toFileSearchCandidate(record: FileRecord): CommandSearchCandidate {
   return {
@@ -168,17 +175,19 @@ export function dedupeCommandSearchCandidates(
   return [...deduped.values()];
 }
 
-export async function presentCommandSearch(options: CommandSearchPresentationOptions): Promise<void> {
+export async function presentCommandSearch(options: CommandSearchPresentationOptions): Promise<boolean> {
   if (!options.completionStyleResults) {
     const query = await vscode.window.showInputBox({ prompt: options.placeholder });
     if (!query) {
-      return;
+      options.onDidHide?.();
+      return false;
     }
 
     const candidates = await Promise.resolve(options.loadCandidates(query, options.fuzzySearch));
     if (candidates.length === 0) {
       void vscode.window.showInformationMessage(options.noResultsMessage(query));
-      return;
+      options.onDidHide?.();
+      return false;
     }
 
     const pick = await vscode.window.showQuickPick(
@@ -197,10 +206,22 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
       await options.onDidAccept((pick as CommandSearchPickItem).candidate);
     }
 
-    return;
+    options.onDidHide?.();
+
+    return true;
+  }
+
+  if (activeCommandSearchQuickPick) {
+    activeCommandSearchQuickPick.suppressHideHandler = true;
+    activeCommandSearchQuickPick.quickPick.hide();
   }
 
   const quickPick = vscode.window.createQuickPick<CommandSearchPickItem>();
+  const quickPickState = {
+    quickPick,
+    suppressHideHandler: false
+  };
+  activeCommandSearchQuickPick = quickPickState;
   let updateSequence = 0;
   let hidden = false;
   const updateItems = async (query: string) => {
@@ -223,6 +244,7 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
 
   quickPick.matchOnDescription = true;
   quickPick.matchOnDetail = true;
+  quickPick.title = options.title ?? '';
   quickPick.placeholder = options.placeholder;
   quickPick.onDidChangeValue((query) => {
     void updateItems(query);
@@ -237,9 +259,16 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
   });
   quickPick.onDidHide(() => {
     hidden = true;
+    if (activeCommandSearchQuickPick === quickPickState) {
+      activeCommandSearchQuickPick = undefined;
+    }
     quickPick.dispose();
+    if (!quickPickState.suppressHideHandler) {
+      options.onDidHide?.();
+    }
   });
 
   quickPick.show();
   await updateItems('');
+  return true;
 }

@@ -6,6 +6,11 @@ import { SymbolIndex } from '../indexes/symbolIndex';
 import { filterCommandSearchCandidates, presentCommandSearch, toSymbolSearchCandidate } from '../shared/commandSearch';
 
 type SymbolCommandBehavior = Partial<Pick<FastIndexerConfig, 'completionStyleResults' | 'fuzzySearch' | 'useFzf'>>;
+type CommandSearchPresentation = {
+  title?: string;
+  placeholder?: string;
+  onDidHide?: () => void;
+};
 
 type CommandSearchDependencies = {
   toolRunner?: ExternalToolRunner;
@@ -20,17 +25,19 @@ const DEFAULT_BEHAVIOR: Required<SymbolCommandBehavior> = {
 export async function goToSymbol(
   symbolIndex: SymbolIndex,
   behavior: SymbolCommandBehavior = DEFAULT_BEHAVIOR,
-  dependencies: CommandSearchDependencies = {}
-): Promise<void> {
+  dependencies: CommandSearchDependencies = {},
+  presentation: CommandSearchPresentation = {}
+): Promise<boolean> {
   if (symbolIndex.isEmpty()) {
     void vscode.window.showInformationMessage('No indexed symbols are available yet.');
-    return;
+    return false;
   }
 
   const resolvedBehavior = { ...DEFAULT_BEHAVIOR, ...behavior };
   const candidates = symbolIndex.all().map(toSymbolSearchCandidate);
-  await presentCommandSearch({
-    placeholder: 'Search indexed symbols',
+  return presentCommandSearch({
+    title: presentation.title,
+    placeholder: presentation.placeholder ?? 'Search indexed symbols',
     noResultsMessage: (query) => `No indexed symbols matched "${query}".`,
     completionStyleResults: resolvedBehavior.completionStyleResults,
     fuzzySearch: resolvedBehavior.fuzzySearch,
@@ -55,6 +62,7 @@ export async function goToSymbol(
       } catch {
         void vscode.window.showErrorMessage(`Unable to open indexed symbol: ${candidate.label}`);
       }
-    }
+    },
+    onDidHide: presentation.onDidHide
   });
 }

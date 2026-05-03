@@ -6,6 +6,11 @@ import { TextIndex } from '../indexes/textIndex';
 import { dedupeCommandSearchCandidates, filterCommandSearchCandidates, presentCommandSearch, toTextSearchCandidate } from '../shared/commandSearch';
 
 type TextCommandBehavior = Partial<Pick<FastIndexerConfig, 'completionStyleResults' | 'fuzzySearch' | 'useRipgrep' | 'useFzf'>>;
+type CommandSearchPresentation = {
+  title?: string;
+  placeholder?: string;
+  onDidHide?: () => void;
+};
 
 type CommandSearchDependencies = {
   toolRunner?: ExternalToolRunner;
@@ -21,17 +26,19 @@ const DEFAULT_BEHAVIOR: Required<TextCommandBehavior> = {
 export async function goToText(
   textIndex: TextIndex,
   behavior: TextCommandBehavior = DEFAULT_BEHAVIOR,
-  dependencies: CommandSearchDependencies = {}
-): Promise<void> {
+  dependencies: CommandSearchDependencies = {},
+  presentation: CommandSearchPresentation = {}
+): Promise<boolean> {
   const resolvedBehavior = { ...DEFAULT_BEHAVIOR, ...behavior };
   const canUseRipgrep = resolvedBehavior.useRipgrep && (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
   if (textIndex.isEmpty() && !canUseRipgrep) {
     void vscode.window.showInformationMessage('No indexed text is available yet.');
-    return;
+    return false;
   }
 
-  await presentCommandSearch({
-    placeholder: 'Search indexed text',
+  return presentCommandSearch({
+    title: presentation.title,
+    placeholder: presentation.placeholder ?? 'Search indexed text',
     noResultsMessage: (query) => `No indexed text matched "${query}".`,
     completionStyleResults: resolvedBehavior.completionStyleResults,
     fuzzySearch: resolvedBehavior.fuzzySearch,
@@ -70,6 +77,7 @@ export async function goToText(
       } catch {
         void vscode.window.showErrorMessage(`Unable to open indexed file: ${candidate.label.split(':')[0]}`);
       }
-    }
+    },
+    onDidHide: presentation.onDidHide
   });
 }

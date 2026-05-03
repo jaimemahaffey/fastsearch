@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getDocumentSymbols } from './bridge/providerBridge';
+import { createCycleSearchModeCommand } from './commands/cycleSearchMode';
 import { findImplementations } from './commands/findImplementations';
 import { findUsages } from './commands/findUsages';
 import { goToFile } from './commands/goToFile';
@@ -173,8 +174,28 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   output.appendLine(`fastIndexer enabled=${config.enabled}`);
+  const cycleSearchMode = createCycleSearchModeCommand(fileIndex, textIndex, symbolIndex, getConfig);
+
+  context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.cycleSearchMode', async () => {
+    if (!getConfig().enabled) {
+      void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
+      return;
+    }
+
+    if (initialFileIndexBuildPending) {
+      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+    }
+
+    if (!await waitForCurrentBuild()) {
+      void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
+      return;
+    }
+
+    await cycleSearchMode.execute();
+  }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.goToFile', async () => {
+    cycleSearchMode.reset();
     if (!getConfig().enabled) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
@@ -193,6 +214,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.goToText', async () => {
+    cycleSearchMode.reset();
     if (!getConfig().enabled) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
@@ -211,6 +233,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.goToSymbol', async () => {
+    cycleSearchMode.reset();
     if (!getConfig().enabled) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;

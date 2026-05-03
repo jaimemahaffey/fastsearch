@@ -6,6 +6,11 @@ import { FileIndex } from '../indexes/fileIndex';
 import { filterCommandSearchCandidates, presentCommandSearch, toFileSearchCandidate } from '../shared/commandSearch';
 
 type FileCommandBehavior = Partial<Pick<FastIndexerConfig, 'completionStyleResults' | 'fuzzySearch' | 'useFzf'>>;
+type CommandSearchPresentation = {
+  title?: string;
+  placeholder?: string;
+  onDidHide?: () => void;
+};
 
 type CommandSearchDependencies = {
   toolRunner?: ExternalToolRunner;
@@ -20,17 +25,19 @@ const DEFAULT_BEHAVIOR: Required<FileCommandBehavior> = {
 export async function goToFile(
   fileIndex: FileIndex,
   behavior: FileCommandBehavior = DEFAULT_BEHAVIOR,
-  dependencies: CommandSearchDependencies = {}
-): Promise<void> {
+  dependencies: CommandSearchDependencies = {},
+  presentation: CommandSearchPresentation = {}
+): Promise<boolean> {
   if (fileIndex.isEmpty()) {
     void vscode.window.showInformationMessage('No indexed files are available yet.');
-    return;
+    return false;
   }
 
   const resolvedBehavior = { ...DEFAULT_BEHAVIOR, ...behavior };
   const candidates = fileIndex.all().map(toFileSearchCandidate);
-  await presentCommandSearch({
-    placeholder: 'Search indexed files',
+  return presentCommandSearch({
+    title: presentation.title,
+    placeholder: presentation.placeholder ?? 'Search indexed files',
     noResultsMessage: (query) => `No indexed files matched "${query}".`,
     completionStyleResults: resolvedBehavior.completionStyleResults,
     fuzzySearch: resolvedBehavior.fuzzySearch,
@@ -52,6 +59,7 @@ export async function goToFile(
       } catch {
         void vscode.window.showErrorMessage(`Unable to open indexed file: ${candidate.description ?? candidate.label}`);
       }
-    }
+    },
+    onDidHide: presentation.onDidHide
   });
 }

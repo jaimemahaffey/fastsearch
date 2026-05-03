@@ -10,6 +10,7 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "workspaceContains:**/*",
+    "onCommand:fastIndexer.cycleSearchMode",
     "onCommand:fastIndexer.goToFile",
     "onCommand:fastIndexer.goToSymbol",
     "onCommand:fastIndexer.goToText",
@@ -19,6 +20,10 @@
   ],
   "contributes": {
     "commands": [
+      {
+        "command": "fastIndexer.cycleSearchMode",
+        "title": "Fast Indexer: Cycle Search Mode"
+      },
       {
         "command": "fastIndexer.goToFile",
         "title": "Fast Indexer: Go To File"
@@ -43,10 +48,16 @@
         "command": "fastIndexer.rebuildIndex",
         "title": "Fast Indexer: Rebuild Index"
       }
-    ],
-    "configuration": {
-      "title": "Fast Symbol Indexer",
-      "properties": {
+      ],
+      "keybindings": [
+        {
+          "command": "fastIndexer.cycleSearchMode",
+          "key": "ctrl+t"
+        }
+      ],
+      "configuration": {
+        "title": "Fast Symbol Indexer",
+        "properties": {
         "fastIndexer.enabled": {
           "type": "boolean",
           "default": true,

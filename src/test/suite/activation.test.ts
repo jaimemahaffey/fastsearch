@@ -18,6 +18,7 @@ suite('activation', () => {
     const commands = await vscode.commands.getCommands(true);
 
     for (const command of [
+      'fastIndexer.cycleSearchMode',
       'fastIndexer.goToFile',
       'fastIndexer.goToSymbol',
       'fastIndexer.goToText',
@@ -47,5 +48,28 @@ suite('activation', () => {
     assert.ok(properties['fastIndexer.completionStyleResults']);
     assert.ok(properties['fastIndexer.useRipgrep']);
     assert.ok(properties['fastIndexer.useFzf']);
+  });
+
+  test('contributes the cycling command and Ctrl+T keybinding in the manifest', async () => {
+    const extension = vscode.extensions.getExtension('local.fast-symbol-indexer');
+    assert.ok(extension, 'extension should be available');
+
+    if (!extension.isActive) {
+      await extension.activate();
+    }
+
+    const commands = extension.packageJSON?.contributes?.commands ?? [];
+    const keybindings = extension.packageJSON?.contributes?.keybindings ?? [];
+
+    assert.ok(
+      commands.some((contribution: { command?: string; }) => contribution.command === 'fastIndexer.cycleSearchMode'),
+      'expected fastIndexer.cycleSearchMode command contribution'
+    );
+    assert.ok(
+      keybindings.some((binding: { command?: string; key?: string; }) =>
+        binding.command === 'fastIndexer.cycleSearchMode' && binding.key === 'ctrl+t'
+      ),
+      'expected Ctrl+T keybinding for fastIndexer.cycleSearchMode'
+    );
   });
 });
