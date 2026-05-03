@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "extension: install here",
+      "type": "shell",
+      "command": "$workspace = (Get-Location).Path; $artifactsDir = Join-Path $workspace '.vscode-test'; $vsix = Join-Path $artifactsDir 'fast-symbol-indexer-current.vsix'; New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null; npm run compile; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx @vscode/vsce package --out $vsix; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; code-insiders --install-extension $vsix --force",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "pwsh",
+          "args": [
+            "-NoProfile",
+            "-Command"
+          ]
+        }
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "extension: run development host",
+      "type": "shell",
+      "command": "$workspace = (Get-Location).Path; $artifactsDir = Join-Path $workspace '.vscode-test'; $userDataDir = Join-Path $artifactsDir 'dev-user-data'; $extensionsDir = Join-Path $artifactsDir 'dev-extensions'; New-Item -ItemType Directory -Force -Path $userDataDir, $extensionsDir | Out-Null; npm run compile; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; code-insiders --new-window --user-data-dir $userDataDir --extensions-dir $extensionsDir --extensionDevelopmentPath $workspace $workspace",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "pwsh",
+          "args": [
+            "-NoProfile",
+            "-Command"
+          ]
+        }
+      },
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
