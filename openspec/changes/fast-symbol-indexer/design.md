@@ -1,92 +1,95 @@
 # Design Notes
 
-## Goals
+## Current State
 
-- Provide fast local navigation for files, symbols, text, usages, and implementations.
-- Keep command interactions responsive even while indexing is incomplete.
-- Use VS Code language-provider APIs for semantic answers when they exist.
-- Use local indexes for speed, fallback behavior, and broad workspace discovery.
-- Avoid broad IDE features outside navigation and discovery.
+The base fast indexer capability is already present in the codebase:
 
-## Architecture
+- extension activation and command registration exist,
+- file, text, and symbol indexes exist,
+- watcher-driven incremental updates exist,
+- navigation and discovery commands exist,
+- and later follow-on changes have already extended the capability with fuzzy completion behavior, optional external search tooling, and mode cycling.
 
-The extension should be organized around a small set of services:
+This design document is therefore no longer about inventing the architecture from scratch. It is about deciding the last operational semantics that still feel underspecified at the base-capability level.
 
-- `ExtensionHost`: activates the extension, wires commands, initializes services, and disposes resources.
-- `IndexCoordinator`: owns indexing lifecycle, rebuild orchestration, cancellation, status, and scheduling.
-- `FileIndex`: stores workspace-relative file metadata and filename tokens.
-- `TextIndex`: stores searchable text tokens or trigrams for eligible files.
-- `SymbolIndex`: stores symbols discovered from `vscode.executeDocumentSymbolProvider`, language providers, and fallback parsers where appropriate.
-- `WorkspaceWatcher`: listens to file creation, deletion, rename, save, and open-document changes.
-- `NavigationCommands`: implements quick-pick workflows and editor reveal behavior.
-- `LanguageFeatureBridge`: calls VS Code commands/providers for references and implementations before using local fallbacks.
+## Design Focus
 
-## Activation
+The remaining design work is concentrated in three areas:
 
-Activation should be lazy but practical:
+1. **Persistence policy**
+2. **Multi-root workspace identity**
+3. **Approximate-result language**
 
-- Activate on the contributed commands.
-- Activate on workspace open when indexing is enabled.
-- Avoid heavy synchronous work during activation.
-- Start index initialization in the background after command registration.
+## 1. Persistence Policy
 
-## Indexing Lifecycle
+There is already persistence-related scaffolding in the implementation, but the user-facing product stance is not clearly defined.
 
-Initial indexing should scan workspace folders using VS Code workspace APIs and configured include/exclude rules. It should batch work, yield between batches, and support cancellation when a rebuild supersedes in-flight work.
+The design considered three possibilities:
 
-Incremental updates should be driven by workspace file-system watchers and text document events. The extension should update open documents from memory, update saved documents from disk, remove deleted files, and coalesce rapid changes with a debounce.
+- **Ephemeral-only:** indexes are rebuilt per session and persistence is not part of the supported feature surface.
+- **Internal cache only:** persistence may exist as an implementation detail, but users do not configure or rely on it.
+- **Supported configurable behavior:** persistence becomes an explicit capability with settings, validation, and lifecycle guarantees.
 
-The index should expose readiness states such as `idle`, `indexing`, `partial`, `stale`, and `error`, allowing commands to show usable partial results instead of blocking.
+### Decision
 
-## File Index
+The base capability will treat persistence as **internal cache only**.
 
-The file index should track workspace-relative paths, basenames, extensions, modified timestamps where available, file size, and workspace folder identity. It should support fuzzy matching by basename and path segments.
+That means:
 
-## Text Index
+- local cached state may exist as an implementation detail,
+- users should not depend on cache survival, portability, or explicit persistence guarantees,
+- and persistence should not yet be presented as a configurable supported feature of the extension.
 
-The text index should index eligible text files only. It should obey maximum file size, binary detection, ignored path patterns, and enabled language filters. It should support fast substring-style search and return enough context to preview matches in quick pick items.
+This keeps the base capability honest and avoids implying guarantees that the extension does not yet expose.
 
-## Symbol Index
+## 2. Multi-Root Workspace Identity
 
-The symbol index should prefer VS Code document symbol providers. It should store symbol name, kind, container name, file URI, range, selection range, and language id when available. It may fall back to lightweight lexical extraction for languages without providers, but fallback results must be clearly treated as less semantic.
+The extension already shows some awareness of multi-root workspaces, but the change artifacts do not clearly define what counts as “the workspace” for cache and lifecycle purposes.
 
-## Commands
+The design needs to answer:
 
-`fastIndexer.goToFile` should show a quick pick backed by `FileIndex`, then open the selected file.
+- Is identity based on the first workspace folder?
+- Is identity based on the full ordered set of workspace folders?
+- Is identity based on the `.code-workspace` file when one exists?
+- What should happen when the set of folders changes?
 
-`fastIndexer.goToSymbol` should show a quick pick backed by `SymbolIndex`, then open the selected file at the symbol selection range.
+### Current Lean
 
-`fastIndexer.goToText` should prompt for text or use the quick-pick filter text, search `TextIndex`, show contextual results, and open the selected match.
+The most future-proof answer is to treat workspace identity as a property of the **entire workspace composition**, not only the first folder.
 
-`fastIndexer.findUsages` should run VS Code reference providers for the active symbol when possible. If no provider is available or it returns no usable result, the command may fall back to text/symbol index matches for the selected identifier.
+Even if the current implementation remains simpler for now, the design should make the intended semantics explicit.
 
-`fastIndexer.findImplementations` should run VS Code implementation providers for the active symbol when possible. If no provider is available, it may fall back to symbol-index candidates that match common implementation shapes without claiming full semantic certainty.
+## 3. Approximate-Result Language
 
-`fastIndexer.rebuildIndex` should cancel current indexing, clear local index state, rebuild from the current workspace, and report progress.
+The base capability already prefers semantic provider results where available and falls back to local index approximations when needed.
 
-## Responsiveness
+What remains is not the mechanism but the language:
 
-- Commands must open quickly and show partial results when indexes are warming.
-- Long operations must use cancellation tokens.
-- Indexing must run in bounded batches and avoid blocking the extension host.
-- Watcher events must be debounced and coalesced.
-- Large files and ignored paths must be skipped early.
-- Errors in one file must not fail the whole index.
+- when should fallback results be shown,
+- how visibly should they be marked,
+- and how should the base capability describe the difference between semantic and approximate answers?
 
-## Configuration
+### Current Lean
 
-The extension should contribute settings under `fastIndexer.*` for enabling indexing, include/exclude patterns, maximum file size, debounce timing, symbol indexing enablement, text indexing enablement, persistence behavior, and language-provider fallback behavior.
+Keep the distinction explicit wherever fallback results are shown. The base capability should avoid overstating semantic confidence.
+
+## Relationship To Other Changes
+
+This narrowed design intentionally does **not** absorb later completed changes:
+
+- fuzzy/completion search remains covered by `add-fuzzy-completion-search`,
+- command mode cycling remains covered by `add-command-mode-cycling`.
+
+Those changes extend the base capability, but they should remain separate in OpenSpec history instead of being folded back into the umbrella design.
 
 ## Risks
 
-- VS Code language-provider support varies by language and installed extensions.
-- Indexing too much text can consume memory in large repositories.
-- File watcher storms can cause churn without careful debouncing.
-- Fallback usage and implementation results may be approximate; UI copy should not overstate semantic certainty.
-- `npm audit` currently reports dev-only vulnerabilities through `mocha` transitive dependencies (`diff` and `serialize-javascript`). A zero-audit lockfile can be produced with overrides, but that forces versions outside `mocha`'s declared dependency ranges and raises the effective install baseline to Node 20 because `serialize-javascript@7.0.5` requires it. Task 1 leaves those findings unresolved until `mocha` ships a stable compatible dependency update or the project explicitly adopts that higher-risk override strategy and Node baseline.
+- Leaving the umbrella change broad makes OpenSpec status misleading.
+- Treating persistence as “implicitly supported” without a product decision invites accidental compatibility guarantees.
+- Treating multi-root support as “good enough” without defining workspace identity can cause subtle cache and rebuild ambiguity later.
+- Approximate fallback results can undermine trust if their confidence level is not described consistently.
 
 ## Open Questions
 
-- Should index persistence be enabled by default or rebuilt per session for simplicity?
-- What is the minimum supported VS Code version?
-- Should the first release support multi-root workspaces fully or treat them as separate indexed roots behind one UI?
+- What exact workspace identity model should the base capability promise?
+- Does the spec need stronger language around how approximate fallback results are labeled?
