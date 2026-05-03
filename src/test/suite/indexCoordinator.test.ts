@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict';
-import { IndexCoordinator } from '../../core/indexCoordinator';
+import { IndexCoordinator, shouldYield } from '../../core/indexCoordinator';
 
 suite('IndexCoordinator', () => {
   test('transitions through explicit coordinator states', () => {
@@ -90,5 +90,13 @@ suite('IndexCoordinator', () => {
     await assert.rejects(() => coordinator.rebuild(), expected);
 
     assert.equal(coordinator.getState(), 'stale');
+  });
+
+  test('yields only after full batch intervals', () => {
+    assert.equal(shouldYield(50, 0), false);
+    assert.equal(shouldYield(50, 25), false);
+    assert.equal(shouldYield(50, 50), true);
+    assert.equal(shouldYield(50, 51), false);
+    assert.equal(shouldYield(50, 100), true);
   });
 });

@@ -50,7 +50,28 @@
         "fastIndexer.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable or disable Fast Symbol Indexer commands and background indexing."
+          "description": "Enable or disable Fast Symbol Indexer local commands and future background indexing work."
+        },
+        "fastIndexer.include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/*"
+          ],
+          "description": "Glob patterns to include when scanning workspace files."
+        },
+        "fastIndexer.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**"
+          ],
+          "description": "Glob patterns to exclude from workspace indexing in addition to built-in heavy-path filters."
         },
         "fastIndexer.maxFileSizeKb": {
           "type": "number",
@@ -61,6 +82,16 @@
           "type": "number",
           "default": 150,
           "description": "Delay in milliseconds before refreshing the index after workspace changes."
+        },
+        "fastIndexer.symbolFallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow approximate symbol-index fallback candidates when provider-backed results are unavailable."
+        },
+        "fastIndexer.providerFallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow local index fallbacks when language providers cannot return usage or implementation results."
         }
       }
     }
@@ -76,6 +107,7 @@
     "@types/vscode": "^1.98.0",
     "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.25.4",
+    "minimatch": "^9.0.9",
     "mocha": "^11.1.0",
     "typescript": "^5.8.3"
   }

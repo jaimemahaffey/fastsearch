@@ -4,3 +4,7 @@ esbuild.mjs
 node_modules/**
 .vscode-test/**
 package-lock.json
+dist/test/**
+docs/**
+openspec/**
+.gitignore

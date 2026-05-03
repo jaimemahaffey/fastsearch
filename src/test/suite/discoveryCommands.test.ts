@@ -55,8 +55,10 @@ suite('discoveryCommands', () => {
     });
 
     try {
-      await findUsages(textIndex, symbolIndex, async () => {
-        awaitedFallback = true;
+      await findUsages(textIndex, symbolIndex, {
+        awaitFallbackReady: async () => {
+          awaitedFallback = true;
+        }
       });
     } finally {
       restorePatches(patches);
@@ -117,8 +119,10 @@ suite('discoveryCommands', () => {
     });
 
     try {
-      await findUsages(textIndex, symbolIndex, async () => {
-        awaitedFallback = true;
+      await findUsages(textIndex, symbolIndex, {
+        awaitFallbackReady: async () => {
+          awaitedFallback = true;
+        }
       });
     } finally {
       restorePatches(patches);
@@ -169,8 +173,10 @@ suite('discoveryCommands', () => {
     });
 
     try {
-      await findImplementations(symbolIndex, async () => {
-        awaitedFallback = true;
+      await findImplementations(symbolIndex, {
+        awaitFallbackReady: async () => {
+          awaitedFallback = true;
+        }
       });
     } finally {
       restorePatches(patches);

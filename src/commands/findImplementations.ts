@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { getImplementations } from '../bridge/providerBridge';
 import { SymbolIndex } from '../indexes/symbolIndex';
-import type { DiscoveryResult } from './findUsages';
+import type { DiscoveryFallbackOptions, DiscoveryResult } from './findUsages';
 
 export function chooseImplementationResults(
   providerResults: DiscoveryResult[],
@@ -12,7 +12,7 @@ export function chooseImplementationResults(
 
 export async function findImplementations(
   symbolIndex: SymbolIndex,
-  awaitFallbackReady?: () => Promise<void>
+  options: DiscoveryFallbackOptions = {}
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
@@ -37,8 +37,12 @@ export async function findImplementations(
   }
 
   let fallbackResults: DiscoveryResult[] = [];
-  if (providerResults.length === 0) {
-    await awaitFallbackReady?.();
+  if (providerResults.length === 0 && (options.allowSymbolFallback ?? true)) {
+    const fallbackReady = await options.awaitFallbackReady?.();
+    if (fallbackReady === false) {
+      return;
+    }
+
     fallbackResults = symbolIndex.findApproximateImplementations(query);
   }
 

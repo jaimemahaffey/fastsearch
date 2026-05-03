@@ -9,6 +9,12 @@ export type DiscoveryResult = {
   approximate: boolean;
 };
 
+export type DiscoveryFallbackOptions = {
+  allowTextFallback?: boolean;
+  allowSymbolFallback?: boolean;
+  awaitFallbackReady?: () => Promise<boolean | void>;
+};
+
 export function chooseUsageResults(
   providerResults: DiscoveryResult[],
   fallbackResults: DiscoveryResult[]
@@ -19,7 +25,7 @@ export function chooseUsageResults(
 export async function findUsages(
   textIndex: TextIndex,
   symbolIndex: SymbolIndex,
-  awaitFallbackReady?: () => Promise<void>
+  options: DiscoveryFallbackOptions = {}
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
@@ -44,11 +50,17 @@ export async function findUsages(
   }
 
   let fallbackResults: DiscoveryResult[] = [];
-  if (providerResults.length === 0) {
-    await awaitFallbackReady?.();
+  const allowTextFallback = options.allowTextFallback ?? true;
+  const allowSymbolFallback = options.allowSymbolFallback ?? true;
+  if (providerResults.length === 0 && (allowTextFallback || allowSymbolFallback)) {
+    const fallbackReady = await options.awaitFallbackReady?.();
+    if (fallbackReady === false) {
+      return;
+    }
+
     fallbackResults = mergeApproximateResults(
-      textIndex.findApproximateUsages(query),
-      symbolIndex.findApproximateUsages(query)
+      allowTextFallback ? textIndex.findApproximateUsages(query) : [],
+      allowSymbolFallback ? symbolIndex.findApproximateUsages(query) : []
     );
   }
 
