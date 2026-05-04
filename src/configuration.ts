@@ -4,6 +4,8 @@ export type FastIndexerConfig = {
   enabled: boolean;
   include: string[];
   exclude: string[];
+  ignoreFiles: string[];
+  sharedIgnoreFiles: string[];
   maxFileSizeKb: number;
   debounceMs: number;
   symbolFallback: boolean;
@@ -17,6 +19,8 @@ export type FastIndexerConfig = {
 const REBUILD_KEYS = new Set([
   'fastIndexer.include',
   'fastIndexer.exclude',
+  'fastIndexer.ignoreFiles',
+  'fastIndexer.sharedIgnoreFiles',
   'fastIndexer.maxFileSizeKb'
 ]);
 
@@ -31,6 +35,8 @@ export function readConfig(): FastIndexerConfig {
     enabled: config.get<boolean>('enabled', true),
     include: readGlobList(config, 'include', DEFAULT_INCLUDE, { allowEmpty: true }),
     exclude: readGlobList(config, 'exclude', DEFAULT_EXCLUDE, { allowEmpty: true }),
+    ignoreFiles: readGlobList(config, 'ignoreFiles', [], { allowEmpty: true }),
+    sharedIgnoreFiles: readGlobList(config, 'sharedIgnoreFiles', [], { allowEmpty: true }),
     maxFileSizeKb,
     debounceMs: Math.max(0, config.get<number>('debounceMs', 150)),
     symbolFallback: config.get<boolean>('symbolFallback', true),
@@ -48,7 +54,7 @@ export function requiresRebuild(event: vscode.ConfigurationChangeEvent): boolean
 
 function readGlobList(
   config: vscode.WorkspaceConfiguration,
-  key: 'include' | 'exclude',
+  key: 'include' | 'exclude' | 'ignoreFiles' | 'sharedIgnoreFiles',
   fallback: string[],
   options: { allowEmpty?: boolean } = {}
 ): string[] {

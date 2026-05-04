@@ -1,15 +1,17 @@
 import { minimatch } from 'minimatch';
+import type { IgnoreMatcher } from './ignoreRules';
 
 export const WORKSPACE_FILE_EXCLUDE_GLOB = '**/{node_modules,.git,.hg,.svn,dist,build,coverage,out,target}/**';
 
 export type UpdateJob =
-  | { type: 'create'; relativePath: string }
-  | { type: 'delete'; relativePath: string }
-  | { type: 'change'; relativePath: string };
+  | { type: 'create'; relativePath: string; filePath?: string }
+  | { type: 'delete'; relativePath: string; filePath?: string }
+  | { type: 'change'; relativePath: string; filePath?: string };
 
 export type WatcherPathFilters = {
   include: string[];
   exclude: string[];
+  ignoreMatcher?: IgnoreMatcher;
 };
 
 const EXCLUDED_PATH_SEGMENTS = new Set([
@@ -43,7 +45,15 @@ export function shouldProcessUpdateJob(
 
   const included = filters.include.length > 0 && filters.include.some((pattern) => matchesGlob(normalizedPath, pattern));
   const excluded = filters.exclude.some((pattern) => matchesGlob(normalizedPath, pattern));
-  return included && !excluded;
+  if (!included || excluded) {
+    return false;
+  }
+
+  if (filters.ignoreMatcher && job.filePath && filters.ignoreMatcher.ignores(job.filePath, job.relativePath)) {
+    return false;
+  }
+
+  return true;
 }
 
 function matchesGlob(value: string, pattern: string): boolean {

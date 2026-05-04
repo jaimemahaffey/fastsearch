@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getDocumentSymbols } from './bridge/providerBridge';
 import { createCycleSearchModeCommand } from './commands/cycleSearchMode';
@@ -9,6 +10,7 @@ import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
+import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
 import { FileIndex } from './indexes/fileIndex';
@@ -33,15 +35,38 @@ export function activate(context: vscode.ExtensionContext): void {
   const textIndex = new TextIndex();
   const persistenceStore = new PersistenceStore(context.globalStorageUri?.fsPath ?? context.storageUri?.fsPath ?? '.fast-indexer-cache');
   const workspacePersistence = getWorkspacePersistence();
+  let activeIgnoreMatcher: IgnoreMatcher = createIgnoreMatcher({
+    exclude: config.exclude,
+    ignoreRules: []
+  });
+  let activePersistenceConfigHash = createPersistenceConfigHash(config, []);
+  let configuredIgnoreFilePaths = new Set<string>();
   let buildGeneration = 0;
+  const refreshIgnoreMatcher = async (): Promise<IgnoreMatcher> => {
+    const loadedIgnoreMatcher = await loadConfiguredIgnoreMatcher(
+      vscode.workspace.fs,
+      getConfig(),
+      vscode.workspace.workspaceFolders ?? [],
+      vscode.workspace.workspaceFile
+    );
+    loadedIgnoreMatcher.diagnostics.forEach((message) => output.appendLine(message));
+    activeIgnoreMatcher = loadedIgnoreMatcher.matcher;
+    activePersistenceConfigHash = createPersistenceConfigHash(getConfig(), loadedIgnoreMatcher.persistenceInputs);
+    configuredIgnoreFilePaths = new Set(
+      loadedIgnoreMatcher.resolvedIgnoreFiles.map((entry) => normalizeWorkspaceFilePath(entry.ignoreFilePath))
+    );
+    return loadedIgnoreMatcher.matcher;
+  };
   const buildWorkspace = async () => {
     const generation = ++buildGeneration;
     const currentConfig = getConfig();
+    const ignoreMatcher = await refreshIgnoreMatcher();
     const completed = await buildWorkspaceIndexes(
       fileIndex,
       symbolIndex,
       textIndex,
       currentConfig,
+      ignoreMatcher,
       output,
       () => getConfig().enabled && generation === buildGeneration
     );
@@ -49,7 +74,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (completed !== false && getConfig().enabled) {
       await persistenceStore.writeWorkspaceSnapshot(
         workspacePersistence.workspaceId,
-        createPersistedWorkspaceSnapshot(workspacePersistence, currentConfig, fileIndex, symbolIndex, textIndex)
+        createPersistedWorkspaceSnapshot(workspacePersistence, activePersistenceConfigHash, fileIndex, symbolIndex, textIndex)
       );
     }
 
@@ -113,7 +138,18 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const queueWorkspaceRefreshForJob = (job: UpdateJob): void => {
-    if (!shouldProcessUpdateJob(job, getWatcherFilters(getConfig()))) {
+    if (job.filePath && configuredIgnoreFilePaths.has(normalizeWorkspaceFilePath(job.filePath))) {
+      void refreshIgnoreMatcher()
+        .catch((error) => {
+          output.appendLine(`Failed to refresh ignore matcher: ${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => {
+          queueWorkspaceRefresh();
+        });
+      return;
+    }
+
+    if (!shouldProcessUpdateJob(job, getWatcherFilters(getConfig(), activeIgnoreMatcher))) {
       return;
     }
 
@@ -163,7 +199,8 @@ export function activate(context: vscode.ExtensionContext): void {
     initialSnapshotPromise = restorePersistedSnapshot(
       persistenceStore,
       workspacePersistence,
-      getConfig(),
+      refreshIgnoreMatcher,
+      () => activePersistenceConfigHash,
       fileIndex,
       symbolIndex,
       textIndex
@@ -391,19 +428,22 @@ export function activate(context: vscode.ExtensionContext): void {
     watcher.onDidCreate((uri) => {
       queueWorkspaceRefreshForJob({
         type: 'create',
-        relativePath: vscode.workspace.asRelativePath(uri, false)
+        relativePath: vscode.workspace.asRelativePath(uri, false),
+        filePath: uri.fsPath
       });
     }),
     watcher.onDidChange((uri) => {
       queueWorkspaceRefreshForJob({
         type: 'change',
-        relativePath: vscode.workspace.asRelativePath(uri, false)
+        relativePath: vscode.workspace.asRelativePath(uri, false),
+        filePath: uri.fsPath
       });
     }),
     watcher.onDidDelete((uri) => {
       queueWorkspaceRefreshForJob({
         type: 'delete',
-        relativePath: vscode.workspace.asRelativePath(uri, false)
+        relativePath: vscode.workspace.asRelativePath(uri, false),
+        filePath: uri.fsPath
       });
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
@@ -445,6 +485,7 @@ async function buildWorkspaceIndexes(
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
   config: FastIndexerConfig,
+  ignoreMatcher: IgnoreMatcher,
   output: vscode.OutputChannel,
   shouldContinue: () => boolean
 ): Promise<boolean> {
@@ -465,6 +506,14 @@ async function buildWorkspaceIndexes(
       }
 
       const relativePath = vscode.workspace.asRelativePath(file, true);
+      if (ignoreMatcher.ignores(file.fsPath, relativePath)) {
+        processedFiles += 1;
+        if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
+          await yieldToEventLoop();
+        }
+        continue;
+      }
+
       fileIndex.upsert(relativePath, file.toString(), toIndexedFileKey(file, relativePath));
 
       try {
@@ -522,18 +571,20 @@ export async function readEligibleTextContent(
 async function restorePersistedSnapshot(
   persistenceStore: PersistenceStore,
   workspacePersistence: WorkspacePersistence,
-  config: FastIndexerConfig,
+  refreshIgnoreMatcher: () => Promise<IgnoreMatcher>,
+  getPersistenceConfigHash: () => string,
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
   textIndex: TextIndex
 ): Promise<boolean> {
   try {
+    await refreshIgnoreMatcher();
     const snapshot = await persistenceStore.readWorkspaceSnapshot(workspacePersistence.workspaceId);
     if (!snapshot) {
       return false;
     }
 
-    if (!isPersistedSnapshotValid(snapshot, workspacePersistence, config)) {
+    if (!isPersistedSnapshotValid(snapshot, workspacePersistence, getPersistenceConfigHash())) {
       await persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId);
       return false;
     }
@@ -573,7 +624,7 @@ function hydrateIndexesFromSnapshot(
 
 function createPersistedWorkspaceSnapshot(
   workspacePersistence: WorkspacePersistence,
-  config: FastIndexerConfig,
+  persistenceConfigHash: string,
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
   textIndex: TextIndex
@@ -582,7 +633,7 @@ function createPersistedWorkspaceSnapshot(
     metadata: {
       schemaVersion: PERSISTENCE_SCHEMA_VERSION,
       workspaceId: workspacePersistence.workspaceId,
-      configHash: createPersistenceConfigHash(config)
+      configHash: persistenceConfigHash
     },
     fileIndex: fileIndex.all(),
     textIndex: textIndex.allContents(),
@@ -608,10 +659,16 @@ function toIndexedSnapshotKey(entry: PersistedWorkspaceSnapshot['fileIndex'][num
   return `${workspaceFolder.uri.toString()}::${entry.relativePath}`;
 }
 
-function createPersistenceConfigHash(config: FastIndexerConfig): string {
+function createPersistenceConfigHash(
+  config: FastIndexerConfig,
+  ignoreInputs: Array<{ path: string; rules?: string[]; missing?: boolean; }>
+): string {
   return JSON.stringify({
     include: config.include,
     exclude: config.exclude,
+    ignoreFiles: config.ignoreFiles,
+    sharedIgnoreFiles: config.sharedIgnoreFiles,
+    ignoreInputs,
     maxFileSizeKb: config.maxFileSizeKb
   });
 }
@@ -619,11 +676,11 @@ function createPersistenceConfigHash(config: FastIndexerConfig): string {
 function isPersistedSnapshotValid(
   snapshot: PersistedWorkspaceSnapshot,
   workspacePersistence: WorkspacePersistence,
-  config: FastIndexerConfig
+  persistenceConfigHash: string
 ): boolean {
   return snapshot.metadata.schemaVersion === PERSISTENCE_SCHEMA_VERSION
     && snapshot.metadata.workspaceId === workspacePersistence.workspaceId
-    && snapshot.metadata.configHash === createPersistenceConfigHash(config);
+    && snapshot.metadata.configHash === persistenceConfigHash;
 }
 
 function getWorkspacePersistence(): WorkspacePersistence {
@@ -667,9 +724,14 @@ function yieldToEventLoop(): Promise<void> {
   });
 }
 
-function getWatcherFilters(config: FastIndexerConfig): WatcherPathFilters {
+function getWatcherFilters(config: FastIndexerConfig, ignoreMatcher: IgnoreMatcher): WatcherPathFilters {
   return {
     include: config.include,
-    exclude: config.exclude
+    exclude: config.exclude,
+    ignoreMatcher
   };
+}
+
+function normalizeWorkspaceFilePath(filePath: string): string {
+  return path.normalize(filePath).toLowerCase();
 }

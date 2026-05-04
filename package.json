@@ -95,6 +95,22 @@
           ],
           "description": "Glob patterns to exclude from workspace indexing in addition to built-in heavy-path filters."
         },
+        "fastIndexer.ignoreFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Paths to .gitignore-style rule files resolved relative to each workspace folder. Each entry is loaded once per folder and merged with built-in exclusions and fastIndexer.exclude."
+        },
+        "fastIndexer.sharedIgnoreFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Paths to .gitignore-style rule files resolved once for the current workspace as a whole. In multi-root workspaces these are workspace-level shared inputs rather than per-folder entries."
+        },
         "fastIndexer.maxFileSizeKb": {
           "type": "number",
           "default": 512,
