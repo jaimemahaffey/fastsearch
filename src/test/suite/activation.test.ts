@@ -42,6 +42,8 @@ suite('activation', () => {
 
     assert.ok(properties['fastIndexer.include']);
     assert.ok(properties['fastIndexer.exclude']);
+    assert.ok(properties['fastIndexer.ignoreFiles']);
+    assert.ok(properties['fastIndexer.sharedIgnoreFiles']);
     assert.ok(properties['fastIndexer.symbolFallback']);
     assert.ok(properties['fastIndexer.providerFallback']);
     assert.ok(properties['fastIndexer.fuzzySearch']);

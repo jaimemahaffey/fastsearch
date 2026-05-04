@@ -13,6 +13,8 @@ suite('configuration', () => {
             enabled: false,
             include: ['src/**/*.ts'],
             exclude: [],
+            ignoreFiles: ['.fast-indexer-ignore'],
+            sharedIgnoreFiles: ['.config/fast-indexer/shared.ignore'],
             maxFileSizeKb: -1,
             debounceMs: -5,
             symbolFallback: false,
@@ -33,6 +35,8 @@ suite('configuration', () => {
         enabled: false,
         include: ['src/**/*.ts'],
         exclude: [],
+        ignoreFiles: ['.fast-indexer-ignore'],
+        sharedIgnoreFiles: ['.config/fast-indexer/shared.ignore'],
         maxFileSizeKb: 0,
         debounceMs: 0,
         symbolFallback: false,
@@ -74,6 +78,8 @@ suite('configuration', () => {
     const watchedKeys = [
       'fastIndexer.include',
       'fastIndexer.exclude',
+      'fastIndexer.ignoreFiles',
+      'fastIndexer.sharedIgnoreFiles',
       'fastIndexer.maxFileSizeKb'
     ];
 
