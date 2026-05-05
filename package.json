@@ -63,7 +63,7 @@
         {
           "command": "fastIndexer.cycleSearchMode",
           "key": "ctrl+t",
-          "when": "inQuickOpen"
+          "when": "inQuickInput"
         },
         {
           "command": "fastIndexer.cycleSearchMode",
