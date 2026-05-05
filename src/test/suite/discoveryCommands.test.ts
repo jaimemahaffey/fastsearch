@@ -73,13 +73,13 @@ suite('discoveryCommands', () => {
           label: 'src/textMatch.ts:1',
           description: undefined,
           detail: 'src/textMatch.ts',
-          iconPath: new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('problemsWarningIcon.foreground'))
+          iconPath: new vscode.ThemeIcon('circle-small', new vscode.ThemeColor('problemsWarningIcon.foreground'))
         },
         {
           label: 'src/symbolMatch.ts:5',
           description: undefined,
           detail: 'src/symbolMatch.ts',
-          iconPath: new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('problemsWarningIcon.foreground'))
+          iconPath: new vscode.ThemeIcon('circle-small', new vscode.ThemeColor('problemsWarningIcon.foreground'))
         }
     ]);
   });
@@ -329,7 +329,7 @@ suite('discoveryCommands', () => {
       assert.deepEqual(quickPick.items.map((item) => item.label), ['src/impl-two.ts:9']);
       assert.equal(quickPick.items[0]?.description, undefined);
       assert.equal(quickPick.items[0]?.detail, 'src/impl-two.ts');
-      assert.equal((quickPick.items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'circle-outline');
+      assert.equal((quickPick.items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'circle-small');
     } finally {
       restorePatches(patches);
     }

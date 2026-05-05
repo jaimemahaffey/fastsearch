@@ -3,7 +3,7 @@ import type { FastIndexerConfig } from '../configuration';
 import type { ExternalToolRunner } from '../externalTools/commandSearchTools';
 import { narrowCommandSearchCandidatesWithFzf, searchTextWithRipgrep } from '../externalTools/commandSearchProviders';
 import { TextIndex } from '../indexes/textIndex';
-import { dedupeCommandSearchCandidates, filterCommandSearchCandidates, presentCommandSearch, toTextSearchCandidate } from '../shared/commandSearch';
+import { dedupeCommandSearchCandidates, filterCommandSearchCandidates, presentCommandSearch, toTextSearchCandidate, withCommandSearchProvenanceIcon } from '../shared/commandSearch';
 
 type TextCommandBehavior = Partial<Pick<FastIndexerConfig, 'completionStyleResults' | 'fuzzySearch' | 'useRipgrep' | 'useFzf'>>;
 type CommandSearchPresentation = {
@@ -62,7 +62,7 @@ export async function goToText(
         dependencies.toolRunner
       );
     },
-    toItem: (candidate) => ({
+    toItem: (candidate) => withCommandSearchProvenanceIcon(candidate, {
       label: candidate.label,
       description: candidate.description,
       detail: `Line ${(candidate.line ?? 0) + 1}, Column ${(candidate.column ?? 0) + 1}`

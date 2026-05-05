@@ -3,7 +3,7 @@ import type { FastIndexerConfig } from '../configuration';
 import type { ExternalToolRunner } from '../externalTools/commandSearchTools';
 import { narrowCommandSearchCandidatesWithFzf } from '../externalTools/commandSearchProviders';
 import { FileIndex } from '../indexes/fileIndex';
-import { filterCommandSearchCandidates, presentCommandSearch, toFileSearchCandidate } from '../shared/commandSearch';
+import { filterCommandSearchCandidates, presentCommandSearch, toFileSearchCandidate, withCommandSearchProvenanceIcon } from '../shared/commandSearch';
 
 type FileCommandBehavior = Partial<Pick<FastIndexerConfig, 'completionStyleResults' | 'fuzzySearch' | 'useFzf'>>;
 type CommandSearchPresentation = {
@@ -47,10 +47,10 @@ export async function goToFile(
       { enabled: resolvedBehavior.useFzf },
       dependencies.toolRunner
     ),
-    toItem: (candidate) => ({
+    toItem: (candidate) => withCommandSearchProvenanceIcon(candidate, {
       label: candidate.label,
       description: candidate.description,
-      detail: 'Indexed file'
+      detail: candidate.detail
     }),
     onDidAccept: async (candidate) => {
       try {

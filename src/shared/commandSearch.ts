@@ -107,17 +107,29 @@ export function toDiscoverySearchCandidate(
 
 export function getCommandSearchProvenanceIcon(candidate: Pick<CommandSearchCandidate, 'approximate'>): vscode.ThemeIcon {
   return candidate.approximate
-    ? new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('problemsWarningIcon.foreground'))
+    ? new vscode.ThemeIcon('circle-small', new vscode.ThemeColor('problemsWarningIcon.foreground'))
     : new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'));
 }
 
+export function getCommandSearchIcon(candidate: Pick<CommandSearchCandidate, 'source' | 'approximate'>): vscode.ThemeIcon {
+  if (candidate.source === 'file') {
+    return new vscode.ThemeIcon('file');
+  }
+
+  if (candidate.source === 'text') {
+    return new vscode.ThemeIcon('search');
+  }
+
+  return getCommandSearchProvenanceIcon(candidate);
+}
+
 export function withCommandSearchProvenanceIcon<T extends vscode.QuickPickItem>(
-  candidate: Pick<CommandSearchCandidate, 'approximate'>,
+  candidate: Pick<CommandSearchCandidate, 'source' | 'approximate'>,
   item: T
 ): T & { iconPath: vscode.ThemeIcon } {
   return {
     ...item,
-    iconPath: getCommandSearchProvenanceIcon(candidate)
+    iconPath: getCommandSearchIcon(candidate)
   };
 }
 

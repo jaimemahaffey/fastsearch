@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import type { DiscoveryResult } from '../../commands/findUsages';
-import { type CommandSearchProvider, collectAvailableProviderResults, getCommandSearchProvenanceIcon, rankCommandSearchCandidates, toDiscoverySearchCandidate, toFileSearchCandidate, toSymbolSearchCandidate, toTextSearchCandidate } from '../../shared/commandSearch';
+import { type CommandSearchProvider, collectAvailableProviderResults, getCommandSearchIcon, getCommandSearchProvenanceIcon, rankCommandSearchCandidates, toDiscoverySearchCandidate, toFileSearchCandidate, toSymbolSearchCandidate, toTextSearchCandidate } from '../../shared/commandSearch';
 import type { FileRecord } from '../../shared/types';
 import type { TextMatch } from '../../indexes/textIndex';
 import type { SymbolRecord } from '../../indexes/symbolIndex';
@@ -85,8 +85,15 @@ suite('commandSearch', () => {
 
     assert.equal(providerIcon.id, 'circle-filled');
     assert.equal(providerIcon.color?.id, 'testing.iconPassed');
-    assert.equal(approximateIcon.id, 'circle-outline');
+    assert.equal(approximateIcon.id, 'circle-small');
     assert.equal(approximateIcon.color?.id, 'problemsWarningIcon.foreground');
+  });
+
+  test('uses compact source icons for file and text command results', () => {
+    assert.equal(getCommandSearchIcon({ source: 'file', approximate: false }).id, 'file');
+    assert.equal(getCommandSearchIcon({ source: 'text', approximate: false }).id, 'search');
+    assert.equal(getCommandSearchIcon({ source: 'symbol', approximate: false }).id, 'circle-filled');
+    assert.equal(getCommandSearchIcon({ source: 'usage', approximate: true }).id, 'circle-small');
   });
 
   test('collects results from available providers only', async () => {

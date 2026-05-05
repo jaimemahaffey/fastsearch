@@ -118,6 +118,7 @@ suite('goToText', () => {
       assert.deepEqual(items.map((item) => item.label), ['src/app/main.ts:2']);
       assert.equal(items[0]?.description, 'export const beta = alpha + 1;');
       assert.equal(items[0]?.detail, 'Line 2, Column 14');
+      assert.equal((items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'search');
 
       quickPick.selectedItems = [quickPick.items[0]!];
       quickPick.fireAccept();

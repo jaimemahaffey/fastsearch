@@ -133,7 +133,8 @@ suite('goToFile', () => {
 
       assert.deepEqual(quickPick.items.map((item) => item.label), ['go-to-file.ts']);
       assert.equal(quickPick.items[0]?.description, 'src/app/go-to-file.ts');
-      assert.equal(quickPick.items[0]?.detail, 'Indexed file');
+      assert.equal(quickPick.items[0]?.detail, vscode.Uri.file('c:\\workspace\\src\\app\\go-to-file.ts').toString());
+      assert.equal((quickPick.items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'file');
 
       quickPick.selectedItems = [quickPick.items[0]!];
       quickPick.fireAccept();
