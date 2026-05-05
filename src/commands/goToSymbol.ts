@@ -3,7 +3,7 @@ import type { FastIndexerConfig } from '../configuration';
 import type { ExternalToolRunner } from '../externalTools/commandSearchTools';
 import { narrowCommandSearchCandidatesWithFzf } from '../externalTools/commandSearchProviders';
 import { SymbolIndex } from '../indexes/symbolIndex';
-import { filterCommandSearchCandidates, presentCommandSearch, toSymbolSearchCandidate } from '../shared/commandSearch';
+import { filterCommandSearchCandidates, presentCommandSearch, toSymbolSearchCandidate, withCommandSearchProvenanceIcon } from '../shared/commandSearch';
 
 type SymbolCommandBehavior = Partial<Pick<FastIndexerConfig, 'completionStyleResults' | 'fuzzySearch' | 'useFzf'>>;
 type CommandSearchPresentation = {
@@ -47,10 +47,10 @@ export async function goToSymbol(
       { enabled: resolvedBehavior.useFzf },
       dependencies.toolRunner
     ),
-    toItem: (candidate) => ({
+    toItem: (candidate) => withCommandSearchProvenanceIcon(candidate, {
       label: candidate.label,
       description: candidate.description,
-      detail: candidate.approximate ? 'Approximate match' : 'Provider-backed match'
+      detail: candidate.detail
     }),
     onDidAccept: async (candidate) => {
       try {

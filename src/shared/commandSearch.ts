@@ -96,12 +96,28 @@ export function toDiscoverySearchCandidate(
   return {
     source,
     label: `${result.uri}:${result.line + 1}`,
-    description: result.approximate ? 'Approximate local match' : 'Provider-backed match',
+    description: undefined,
     detail: result.uri,
     filterText: result.uri,
     uri: result.uri,
     line: result.line,
     approximate: result.approximate
+  };
+}
+
+export function getCommandSearchProvenanceIcon(candidate: Pick<CommandSearchCandidate, 'approximate'>): vscode.ThemeIcon {
+  return candidate.approximate
+    ? new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('problemsWarningIcon.foreground'))
+    : new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'));
+}
+
+export function withCommandSearchProvenanceIcon<T extends vscode.QuickPickItem>(
+  candidate: Pick<CommandSearchCandidate, 'approximate'>,
+  item: T
+): T & { iconPath: vscode.ThemeIcon } {
+  return {
+    ...item,
+    iconPath: getCommandSearchProvenanceIcon(candidate)
   };
 }
 

@@ -11,6 +11,7 @@ type QuickPickItem = {
   label: string;
   description?: string;
   detail?: string;
+  iconPath?: vscode.ThemeIcon;
 };
 
 suite('discoveryCommands', () => {
@@ -49,7 +50,8 @@ suite('discoveryCommands', () => {
         pickedItems = items.map((item) => ({
           label: item.label,
           description: item.description,
-          detail: item.detail
+          detail: item.detail,
+          iconPath: item.iconPath as vscode.ThemeIcon | undefined
         }));
         return undefined;
       }
@@ -67,16 +69,18 @@ suite('discoveryCommands', () => {
 
     assert.equal(awaitedFallback, true);
     assert.deepEqual(pickedItems, [
-      {
-        label: 'src/textMatch.ts:1',
-        description: 'Approximate local match',
-        detail: 'src/textMatch.ts'
-      },
-      {
-        label: 'src/symbolMatch.ts:5',
-        description: 'Approximate local match',
-        detail: 'src/symbolMatch.ts'
-      }
+        {
+          label: 'src/textMatch.ts:1',
+          description: undefined,
+          detail: 'src/textMatch.ts',
+          iconPath: new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('problemsWarningIcon.foreground'))
+        },
+        {
+          label: 'src/symbolMatch.ts:5',
+          description: undefined,
+          detail: 'src/symbolMatch.ts',
+          iconPath: new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('problemsWarningIcon.foreground'))
+        }
     ]);
   });
 
@@ -113,7 +117,8 @@ suite('discoveryCommands', () => {
         pickedItems = items.map((item) => ({
           label: item.label,
           description: item.description,
-          detail: item.detail
+          detail: item.detail,
+          iconPath: item.iconPath as vscode.ThemeIcon | undefined
         }));
         return undefined;
       }
@@ -133,8 +138,9 @@ suite('discoveryCommands', () => {
     assert.deepEqual(pickedItems, [
       {
         label: 'src/provider.ts:3',
-        description: 'Provider-backed match',
-        detail: 'src/provider.ts'
+        description: undefined,
+        detail: 'src/provider.ts',
+        iconPath: new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'))
       }
     ]);
   });
@@ -167,7 +173,8 @@ suite('discoveryCommands', () => {
         pickedItems = items.map((item) => ({
           label: item.label,
           description: item.description,
-          detail: item.detail
+          detail: item.detail,
+          iconPath: item.iconPath as vscode.ThemeIcon | undefined
         }));
         return undefined;
       }
@@ -187,8 +194,9 @@ suite('discoveryCommands', () => {
     assert.deepEqual(pickedItems, [
       {
         label: 'src/implementation.ts:8',
-        description: 'Provider-backed match',
-        detail: 'src/implementation.ts'
+        description: undefined,
+        detail: 'src/implementation.ts',
+        iconPath: new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'))
       }
     ]);
   });
@@ -239,8 +247,9 @@ suite('discoveryCommands', () => {
       await narrowedItems;
 
       assert.deepEqual(quickPick.items.map((item) => item.label), ['src/provider-beta.ts:6']);
-      assert.equal(quickPick.items[0]?.description, 'Provider-backed match');
+      assert.equal(quickPick.items[0]?.description, undefined);
       assert.equal(quickPick.items[0]?.detail, 'src/provider-beta.ts');
+      assert.equal((quickPick.items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'circle-filled');
     } finally {
       restorePatches(patches);
     }
@@ -318,8 +327,9 @@ suite('discoveryCommands', () => {
       await narrowedItems;
 
       assert.deepEqual(quickPick.items.map((item) => item.label), ['src/impl-two.ts:9']);
-      assert.equal(quickPick.items[0]?.description, 'Approximate local match');
+      assert.equal(quickPick.items[0]?.description, undefined);
       assert.equal(quickPick.items[0]?.detail, 'src/impl-two.ts');
+      assert.equal((quickPick.items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'circle-outline');
     } finally {
       restorePatches(patches);
     }

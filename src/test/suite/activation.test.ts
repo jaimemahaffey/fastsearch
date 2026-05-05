@@ -1,10 +1,12 @@
 import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 
+const EXTENSION_ID = 'jaimemahaffey.fastsearch';
+
 suite('activation', () => {
   test('registers the required commands', async function () {
     this.timeout(10000);
-    const extension = vscode.extensions.getExtension('local.fast-symbol-indexer');
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(extension, 'extension should be available');
 
     if (!extension.isActive) {
@@ -31,7 +33,7 @@ suite('activation', () => {
   });
 
   test('exposes persisted-index settings in the manifest', async () => {
-    const extension = vscode.extensions.getExtension('local.fast-symbol-indexer');
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(extension, 'extension should be available');
 
     if (!extension.isActive) {
@@ -53,7 +55,7 @@ suite('activation', () => {
   });
 
   test('contributes the cycling command and Ctrl+T keybinding in the manifest', async () => {
-    const extension = vscode.extensions.getExtension('local.fast-symbol-indexer');
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(extension, 'extension should be available');
 
     if (!extension.isActive) {

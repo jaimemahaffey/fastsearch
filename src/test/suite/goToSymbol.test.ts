@@ -58,7 +58,8 @@ suite('goToSymbol', () => {
 
       assert.deepEqual(quickPick.items.map((item) => item.label), ['MainGraphRenderer']);
       assert.equal(quickPick.items[0]?.description, 'Graph');
-      assert.equal(quickPick.items[0]?.detail, 'Provider-backed match');
+      assert.equal(quickPick.items[0]?.detail, vscode.Uri.file('c:\\workspace\\src\\app\\main.ts').toString());
+      assert.equal((quickPick.items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'circle-filled');
 
       quickPick.selectedItems = [quickPick.items[0]!];
       quickPick.fireAccept();

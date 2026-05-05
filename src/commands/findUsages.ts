@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { ExternalToolRunner } from '../externalTools/commandSearchTools';
 import { narrowCommandSearchCandidatesWithFzf } from '../externalTools/commandSearchProviders';
-import { filterCommandSearchCandidates, presentCommandSearch, toDiscoverySearchCandidate } from '../shared/commandSearch';
+import { filterCommandSearchCandidates, presentCommandSearch, toDiscoverySearchCandidate, withCommandSearchProvenanceIcon } from '../shared/commandSearch';
 import { getReferences } from '../bridge/providerBridge';
 import { SymbolIndex } from '../indexes/symbolIndex';
 import { TextIndex } from '../indexes/textIndex';
@@ -94,9 +94,11 @@ export async function findUsages(
   if (!(options.completionStyleResults ?? false)) {
     const pick = await vscode.window.showQuickPick(
       candidates.map((candidate) => ({
-        label: candidate.label,
-        description: candidate.description,
-        detail: candidate.detail,
+        ...withCommandSearchProvenanceIcon(candidate, {
+          label: candidate.label,
+          description: candidate.description,
+          detail: candidate.detail
+        }),
         candidate
       }))
     );
@@ -129,7 +131,7 @@ export async function findUsages(
       { enabled: options.useFzf ?? false },
       dependencies.toolRunner
     ),
-    toItem: (candidate) => ({
+    toItem: (candidate) => withCommandSearchProvenanceIcon(candidate, {
       label: candidate.label,
       description: candidate.description,
       detail: candidate.detail

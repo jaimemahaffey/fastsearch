@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import type { DiscoveryResult } from '../../commands/findUsages';
-import { type CommandSearchProvider, collectAvailableProviderResults, rankCommandSearchCandidates, toDiscoverySearchCandidate, toFileSearchCandidate, toSymbolSearchCandidate, toTextSearchCandidate } from '../../shared/commandSearch';
+import { type CommandSearchProvider, collectAvailableProviderResults, getCommandSearchProvenanceIcon, rankCommandSearchCandidates, toDiscoverySearchCandidate, toFileSearchCandidate, toSymbolSearchCandidate, toTextSearchCandidate } from '../../shared/commandSearch';
 import type { FileRecord } from '../../shared/types';
 import type { TextMatch } from '../../indexes/textIndex';
 import type { SymbolRecord } from '../../indexes/symbolIndex';
@@ -70,13 +70,23 @@ suite('commandSearch', () => {
     assert.deepEqual(toDiscoverySearchCandidate('usage', discoveryResult), {
       source: 'usage',
       label: 'file:///workspace/src/app/main.ts:15',
-      description: 'Approximate local match',
+      description: undefined,
       detail: fileRecord.uri,
       filterText: 'file:///workspace/src/app/main.ts',
       uri: fileRecord.uri,
       line: 14,
       approximate: true
     });
+  });
+
+  test('uses distinct subtle icons for provider-backed and approximate command results', () => {
+    const providerIcon = getCommandSearchProvenanceIcon({ approximate: false });
+    const approximateIcon = getCommandSearchProvenanceIcon({ approximate: true });
+
+    assert.equal(providerIcon.id, 'circle-filled');
+    assert.equal(providerIcon.color?.id, 'testing.iconPassed');
+    assert.equal(approximateIcon.id, 'circle-outline');
+    assert.equal(approximateIcon.color?.id, 'problemsWarningIcon.foreground');
   });
 
   test('collects results from available providers only', async () => {

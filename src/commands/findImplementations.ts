@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { getImplementations } from '../bridge/providerBridge';
 import type { ExternalToolRunner } from '../externalTools/commandSearchTools';
 import { narrowCommandSearchCandidatesWithFzf } from '../externalTools/commandSearchProviders';
-import { filterCommandSearchCandidates, presentCommandSearch, toDiscoverySearchCandidate } from '../shared/commandSearch';
+import { filterCommandSearchCandidates, presentCommandSearch, toDiscoverySearchCandidate, withCommandSearchProvenanceIcon } from '../shared/commandSearch';
 import { SymbolIndex } from '../indexes/symbolIndex';
 import type { DiscoveryFallbackOptions, DiscoveryResult } from './findUsages';
 
@@ -73,9 +73,11 @@ export async function findImplementations(
   if (!(options.completionStyleResults ?? false)) {
     const pick = await vscode.window.showQuickPick(
       candidates.map((candidate) => ({
-        label: candidate.label,
-        description: candidate.description,
-        detail: candidate.detail,
+        ...withCommandSearchProvenanceIcon(candidate, {
+          label: candidate.label,
+          description: candidate.description,
+          detail: candidate.detail
+        }),
         candidate
       }))
     );
@@ -108,7 +110,7 @@ export async function findImplementations(
       { enabled: options.useFzf ?? false },
       dependencies.toolRunner
     ),
-    toItem: (candidate) => ({
+    toItem: (candidate) => withCommandSearchProvenanceIcon(candidate, {
       label: candidate.label,
       description: candidate.description,
       detail: candidate.detail
