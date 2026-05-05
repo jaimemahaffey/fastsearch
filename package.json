@@ -3,7 +3,12 @@
   "displayName": "Fast Symbol Indexer",
   "description": "VS Code extension for fast workspace symbol indexing and navigation.",
   "version": "0.0.1",
-  "publisher": "local",
+  "publisher": "jaimemahaffey",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaimemahaffey/fast-symbol-indexer.git"
+  },
+  "license": "MIT",
   "engines": {
     "vscode": "^1.98.0"
   },
