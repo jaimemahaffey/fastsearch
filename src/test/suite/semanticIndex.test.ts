@@ -40,6 +40,102 @@ suite('semantic enrichment index', () => {
     assert.equal(restored.get('src/alpha.ts', 'Alpha:5:7:class')?.status, 'failed');
   });
 
+  test('set() does not share nested target objects with input metadata', () => {
+    const index = new SemanticIndex();
+    const inputMetadata: SemanticMetadata = {
+      definition: { uri: 'file:///workspace/src/alpha.ts', line: 3, column: 2 },
+      declaration: { uri: 'file:///workspace/src/alpha.d.ts', line: 1, column: 0 },
+      typeDefinition: { uri: 'file:///workspace/src/types.ts', line: 5, column: 4 },
+      provider: 'vscode',
+      status: 'enriched',
+      confidence: 1,
+      enrichedAt: 123
+    };
+
+    index.set('src/alpha.ts', 'Alpha:5:7:class', inputMetadata);
+
+    // Mutate input nested objects
+    inputMetadata.definition!.line = 999;
+    inputMetadata.declaration!.column = 888;
+    inputMetadata.typeDefinition!.uri = 'file:///mutated.ts';
+
+    const stored = index.get('src/alpha.ts', 'Alpha:5:7:class');
+    assert.equal(stored?.definition?.line, 3, 'stored definition should not be affected');
+    assert.equal(stored?.declaration?.column, 0, 'stored declaration should not be affected');
+    assert.equal(stored?.typeDefinition?.uri, 'file:///workspace/src/types.ts', 'stored typeDefinition should not be affected');
+  });
+
+  test('get() does not share nested target objects with stored metadata', () => {
+    const index = new SemanticIndex();
+    index.set('src/alpha.ts', 'Alpha:5:7:class', {
+      definition: { uri: 'file:///workspace/src/alpha.ts', line: 3, column: 2 },
+      declaration: { uri: 'file:///workspace/src/alpha.d.ts', line: 1, column: 0 },
+      provider: 'vscode',
+      status: 'enriched',
+      confidence: 1,
+      enrichedAt: 123
+    });
+
+    const retrieved1 = index.get('src/alpha.ts', 'Alpha:5:7:class')!;
+    
+    // Mutate retrieved nested objects
+    retrieved1.definition!.line = 777;
+    retrieved1.declaration!.uri = 'file:///mutated.ts';
+
+    const retrieved2 = index.get('src/alpha.ts', 'Alpha:5:7:class')!;
+    assert.equal(retrieved2.definition?.line, 3, 'second retrieval should not be affected');
+    assert.equal(retrieved2.declaration?.uri, 'file:///workspace/src/alpha.d.ts', 'second retrieval should not be affected');
+  });
+
+  test('allByFile() does not share nested target objects with stored metadata', () => {
+    const index = new SemanticIndex();
+    index.set('src/alpha.ts', 'Alpha:5:7:class', {
+      definition: { uri: 'file:///workspace/src/alpha.ts', line: 3, column: 2 },
+      typeDefinition: { uri: 'file:///workspace/src/types.ts', line: 5, column: 4 },
+      provider: 'vscode',
+      status: 'enriched',
+      confidence: 1,
+      enrichedAt: 123
+    });
+
+    const serialized = index.allByFile();
+    
+    // Mutate serialized nested objects
+    serialized[0]!.entries[0]!.metadata.definition!.column = 666;
+    serialized[0]!.entries[0]!.metadata.typeDefinition!.line = 555;
+
+    const retrieved = index.get('src/alpha.ts', 'Alpha:5:7:class')!;
+    assert.equal(retrieved.definition?.column, 2, 'stored definition should not be affected by serialization mutation');
+    assert.equal(retrieved.typeDefinition?.line, 5, 'stored typeDefinition should not be affected by serialization mutation');
+  });
+
+  test('replaceForFile() does not share nested target objects with input entries', () => {
+    const index = new SemanticIndex();
+    const inputEntries = [
+      {
+        key: 'Alpha:5:7:class',
+        metadata: {
+          definition: { uri: 'file:///workspace/src/alpha.ts', line: 3, column: 2 },
+          declaration: { uri: 'file:///workspace/src/alpha.d.ts', line: 1, column: 0 },
+          provider: 'vscode' as const,
+          status: 'enriched' as const,
+          confidence: 1,
+          enrichedAt: 123
+        }
+      }
+    ];
+
+    index.replaceForFile('src/alpha.ts', inputEntries);
+
+    // Mutate input nested objects
+    inputEntries[0]!.metadata.definition!.line = 444;
+    inputEntries[0]!.metadata.declaration!.column = 333;
+
+    const stored = index.get('src/alpha.ts', 'Alpha:5:7:class')!;
+    assert.equal(stored.definition?.line, 3, 'stored definition should not be affected by input mutation');
+    assert.equal(stored.declaration?.column, 0, 'stored declaration should not be affected by input mutation');
+  });
+
   test('creates stable semantic keys from symbol identity fields', () => {
     const symbol = {
       name: 'Alpha',
