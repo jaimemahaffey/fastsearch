@@ -3,4 +3,5 @@ dist/
 node_modules/
 .vscode-test/
 .github/*
-!.github/copilot-instructions.md
+!.github/copilot-instructions.m
+*.vsix
