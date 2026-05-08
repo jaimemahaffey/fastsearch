@@ -2,7 +2,7 @@
   "name": "fastsearch",
   "displayName": "FastSearch",
   "description": "VS Code extension for fast workspace symbol indexing and navigation.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "jaimemahaffey",
   "repository": {
     "type": "git",
@@ -53,41 +53,41 @@
         "command": "fastIndexer.rebuildIndex",
         "title": "Fast Indexer: Rebuild Index"
       }
-      ],
-      "keybindings": [
-        {
-          "command": "fastIndexer.cycleSearchMode",
-          "key": "ctrl+t"
-        },
-        {
-          "command": "fastIndexer.cycleSearchMode",
-          "key": "ctrl+t",
-          "when": "editorTextFocus"
-        },
-        {
-          "command": "fastIndexer.cycleSearchMode",
-          "key": "ctrl+t",
-          "when": "inQuickInput"
-        },
-        {
-          "command": "fastIndexer.cycleSearchMode",
-          "key": "ctrl+t",
-          "when": "inQuickOpen"
-        },
-        {
-          "command": "fastIndexer.cycleSearchMode",
-          "key": "ctrl+t",
-          "when": "fastIndexer.cyclePickerActive"
-        },
-        {
-          "command": "fastIndexer.cycleSearchMode",
-          "key": "ctrl+t",
-          "when": "terminalFocus"
-        }
-      ],
-      "configuration": {
-        "title": "Fast Symbol Indexer",
-        "properties": {
+    ],
+    "keybindings": [
+      {
+        "command": "fastIndexer.cycleSearchMode",
+        "key": "ctrl+t"
+      },
+      {
+        "command": "fastIndexer.cycleSearchMode",
+        "key": "ctrl+t",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "fastIndexer.cycleSearchMode",
+        "key": "ctrl+t",
+        "when": "inQuickInput"
+      },
+      {
+        "command": "fastIndexer.cycleSearchMode",
+        "key": "ctrl+t",
+        "when": "inQuickOpen"
+      },
+      {
+        "command": "fastIndexer.cycleSearchMode",
+        "key": "ctrl+t",
+        "when": "fastIndexer.cyclePickerActive"
+      },
+      {
+        "command": "fastIndexer.cycleSearchMode",
+        "key": "ctrl+t",
+        "when": "terminalFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Fast Symbol Indexer",
+      "properties": {
         "fastIndexer.enabled": {
           "type": "boolean",
           "default": true,
