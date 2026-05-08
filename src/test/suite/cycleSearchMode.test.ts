@@ -20,10 +20,14 @@ async function activateWithCycleHarness(
 ): Promise<{
   registeredCommands: RegisteredCommands;
   infoMessages: string[];
+  outputLines: string[];
+  contextUpdates: Array<{ key: string; value: boolean; }>;
   restore(): void;
 }> {
   const registeredCommands: RegisteredCommands = new Map();
   const infoMessages: string[] = [];
+  const outputLines: string[] = [];
+  const contextUpdates: Array<{ key: string; value: boolean; }> = [];
   const quickPickQueue = [...quickPicks];
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fastsearch-cycle-'));
   const tempFile = path.join(tempRoot, 'src', 'app', 'main.ts');
@@ -33,7 +37,9 @@ async function activateWithCycleHarness(
   fs.writeFileSync(tempFile, 'const alpha = beta;\n', 'utf8');
   const patches = [
     patchProperty(vscode.window, 'createOutputChannel', ((() => ({
-      appendLine: () => undefined,
+      appendLine: (line: string) => {
+        outputLines.push(line);
+      },
       dispose: () => undefined,
       name: 'Fast Symbol Indexer',
       append: () => undefined,
@@ -143,7 +149,15 @@ async function activateWithCycleHarness(
       'writeWorkspaceSnapshot',
       (async () => undefined) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
     ),
-    patchProperty(vscode.commands, 'executeCommand', (async <T>(command: string) => {
+    patchProperty(vscode.commands, 'executeCommand', (async <T>(command: string, ...args: unknown[]) => {
+      if (command === 'setContext') {
+        contextUpdates.push({
+          key: String(args[0]),
+          value: Boolean(args[1])
+        });
+        return undefined as T;
+      }
+
       if (command === 'vscode.executeDocumentSymbolProvider') {
         if (options.symbolsAvailable === false) {
           return [] as T;
@@ -157,6 +171,12 @@ async function activateWithCycleHarness(
     }) as typeof vscode.commands.executeCommand)
   ];
   const restoreAll = (): void => {
+    for (const quickPick of quickPicks) {
+      if (quickPick.showed && !quickPick.disposed) {
+        quickPick.hide();
+      }
+    }
+
     for (const patch of [...patches].reverse()) {
       restoreProperty(patch as never);
     }
@@ -171,11 +191,13 @@ async function activateWithCycleHarness(
     await Promise.resolve();
     await Promise.resolve();
 
-    return {
-      registeredCommands,
-      infoMessages,
-      restore: restoreAll
-    };
+      return {
+        registeredCommands,
+        infoMessages,
+        outputLines,
+        contextUpdates,
+        restore: restoreAll
+      };
   } catch (error) {
     restoreAll();
     throw error;
@@ -208,6 +230,73 @@ suite('cycleSearchMode', () => {
       assert.equal(quickPicks[1].disposed, true);
       assert.equal(quickPicks[2].title, 'Fast Indexer: File Mode');
       assert.equal(quickPicks[2].placeholder, 'Search indexed files (file mode)');
+    } finally {
+      harness.restore();
+    }
+  });
+
+  test('logs cycle command transitions and picker replacement lifecycle', async () => {
+    const quickPicks = [
+      new FakeQuickPick<vscode.QuickPickItem & { candidate?: unknown; }>(),
+      new FakeQuickPick<vscode.QuickPickItem & { candidate?: unknown; }>()
+    ];
+    const harness = await activateWithCycleHarness(quickPicks);
+
+    try {
+      const cycleCommand = harness.registeredCommands.get('fastIndexer.cycleSearchMode');
+      assert.ok(cycleCommand, 'cycleSearchMode command should be registered');
+
+      await Promise.resolve(cycleCommand?.());
+      await Promise.resolve(cycleCommand?.());
+
+      assert.deepEqual(
+        harness.outputLines.filter((line) => line.startsWith('[cycle]')),
+        [
+          '[cycle] command invoked',
+          '[cycle] executing mode=symbol previousMode=none',
+          '[cycle] opening picker title="Fast Indexer: Symbol Mode"',
+          '[cycle] context fastIndexer.cyclePickerActive=true',
+          '[cycle] picker shown title="Fast Indexer: Symbol Mode"',
+          '[cycle] picker items updated title="Fast Indexer: Symbol Mode" query="" count=1',
+          '[cycle] mode=symbol opened=true',
+          '[cycle] command invoked',
+          '[cycle] executing mode=text previousMode=symbol',
+          '[cycle] opening picker title="Fast Indexer: Text Mode"',
+          '[cycle] replacing active picker title="Fast Indexer: Symbol Mode"',
+          '[cycle] picker hidden title="Fast Indexer: Symbol Mode" suppressHideHandler=true',
+          '[cycle] context fastIndexer.cyclePickerActive=false',
+          '[cycle] picker hide handler suppressed title="Fast Indexer: Symbol Mode"',
+          '[cycle] context fastIndexer.cyclePickerActive=true',
+          '[cycle] picker shown title="Fast Indexer: Text Mode"',
+          '[cycle] picker items updated title="Fast Indexer: Text Mode" query="" count=0',
+          '[cycle] mode=text opened=true'
+        ]
+      );
+    } finally {
+      harness.restore();
+    }
+  });
+
+  test('sets a dedicated cycle picker keybinding context while the cycle picker is active', async () => {
+    const quickPicks = [
+      new FakeQuickPick<vscode.QuickPickItem & { candidate?: unknown; }>(),
+      new FakeQuickPick<vscode.QuickPickItem & { candidate?: unknown; }>()
+    ];
+    const harness = await activateWithCycleHarness(quickPicks);
+
+    try {
+      const cycleCommand = harness.registeredCommands.get('fastIndexer.cycleSearchMode');
+      assert.ok(cycleCommand, 'cycleSearchMode command should be registered');
+
+      await Promise.resolve(cycleCommand?.());
+      quickPicks[0].hide();
+      await Promise.resolve(cycleCommand?.());
+
+      assert.deepEqual(harness.contextUpdates, [
+        { key: 'fastIndexer.cyclePickerActive', value: true },
+        { key: 'fastIndexer.cyclePickerActive', value: false },
+        { key: 'fastIndexer.cyclePickerActive', value: true }
+      ]);
     } finally {
       harness.restore();
     }

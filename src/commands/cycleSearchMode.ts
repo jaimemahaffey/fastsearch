@@ -14,6 +14,7 @@ type ModePresentation = {
 };
 
 const SEARCH_MODE_SEQUENCE: SearchMode[] = ['symbol', 'text', 'file'];
+const CYCLE_PICKER_CONTEXT_KEY = 'fastIndexer.cyclePickerActive';
 const MODE_PRESENTATION: Record<SearchMode, ModePresentation> = {
   symbol: {
     title: 'Fast Indexer: Symbol Mode',
@@ -42,26 +43,35 @@ export function createCycleSearchModeCommand(
   fileIndex: FileIndex,
   textIndex: TextIndex,
   symbolIndex: SymbolIndex,
-  getConfig: () => FastIndexerConfig
+  getConfig: () => FastIndexerConfig,
+  debugLog?: (message: string) => void
 ): { execute: () => Promise<void>; reset: () => void; } {
   let activeMode: SearchMode | undefined;
 
   const reset = (): void => {
+    if (activeMode) {
+      debugLog?.(`reset previousMode=${activeMode}`);
+    }
     activeMode = undefined;
   };
 
   const execute = async (): Promise<void> => {
-    const mode = nextSearchMode(activeMode);
+    const previousMode = activeMode;
+    const mode = nextSearchMode(previousMode);
+    debugLog?.(`executing mode=${mode} previousMode=${previousMode ?? 'none'}`);
     activeMode = mode;
 
     const config = getConfig();
     const behavior = { ...config, completionStyleResults: true };
     const presentation = {
       ...MODE_PRESENTATION[mode],
-      onDidHide: reset
+      onDidHide: reset,
+      debugLog,
+      activeContextKey: CYCLE_PICKER_CONTEXT_KEY
     };
     let opened = false;
 
+    debugLog?.(`opening picker title="${presentation.title}"`);
     if (mode === 'symbol') {
       opened = await goToSymbol(symbolIndex, behavior, {}, presentation);
     } else if (mode === 'text') {
@@ -70,6 +80,7 @@ export function createCycleSearchModeCommand(
       opened = await goToFile(fileIndex, behavior, {}, presentation);
     }
 
+    debugLog?.(`mode=${mode} opened=${opened}`);
     if (!opened) {
       reset();
     }

@@ -31,6 +31,8 @@ export type CommandSearchPresentationOptions = {
   noResultsMessage: (query: string) => string;
   completionStyleResults: boolean;
   fuzzySearch: boolean;
+  debugLog?: (message: string) => void;
+  activeContextKey?: string;
   loadCandidates: (
     query: string,
     fuzzySearch: boolean
@@ -240,6 +242,7 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
   }
 
   if (activeCommandSearchQuickPick) {
+    options.debugLog?.(`replacing active picker title="${activeCommandSearchQuickPick.quickPick.title}"`);
     activeCommandSearchQuickPick.suppressHideHandler = true;
     activeCommandSearchQuickPick.quickPick.hide();
   }
@@ -252,6 +255,10 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
   activeCommandSearchQuickPick = quickPickState;
   let updateSequence = 0;
   let hidden = false;
+  if (options.activeContextKey) {
+    await vscode.commands.executeCommand('setContext', options.activeContextKey, true);
+    options.debugLog?.(`context ${options.activeContextKey}=true`);
+  }
   const updateItems = async (query: string) => {
     const currentSequence = ++updateSequence;
     quickPick.busy = true;
@@ -268,6 +275,7 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
       ? options.noResultsMessage(query)
       : options.placeholder;
     quickPick.busy = false;
+    options.debugLog?.(`picker items updated title="${quickPick.title}" query="${query}" count=${candidates.length}`);
   };
 
   quickPick.matchOnDescription = true;
@@ -280,6 +288,7 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
   quickPick.onDidAccept(() => {
     const candidate = quickPick.selectedItems[0]?.candidate;
     if (candidate) {
+      options.debugLog?.(`picker accepted title="${quickPick.title}" label="${candidate.label}"`);
       void options.onDidAccept(candidate);
     }
 
@@ -287,16 +296,24 @@ export async function presentCommandSearch(options: CommandSearchPresentationOpt
   });
   quickPick.onDidHide(() => {
     hidden = true;
+    options.debugLog?.(`picker hidden title="${quickPick.title}" suppressHideHandler=${quickPickState.suppressHideHandler}`);
     if (activeCommandSearchQuickPick === quickPickState) {
       activeCommandSearchQuickPick = undefined;
+    }
+    if (options.activeContextKey) {
+      void vscode.commands.executeCommand('setContext', options.activeContextKey, false);
+      options.debugLog?.(`context ${options.activeContextKey}=false`);
     }
     quickPick.dispose();
     if (!quickPickState.suppressHideHandler) {
       options.onDidHide?.();
+    } else {
+      options.debugLog?.(`picker hide handler suppressed title="${quickPick.title}"`);
     }
   });
 
   quickPick.show();
+  options.debugLog?.(`picker shown title="${quickPick.title}"`);
   await updateItems('');
   return true;
 }

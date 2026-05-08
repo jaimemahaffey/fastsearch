@@ -1,7 +1,7 @@
 import { minimatch } from 'minimatch';
 import type { IgnoreMatcher } from './ignoreRules';
 
-export const WORKSPACE_FILE_EXCLUDE_GLOB = '**/{node_modules,.git,.hg,.svn,dist,build,coverage,out,target}/**';
+export const WORKSPACE_FILE_EXCLUDE_GLOB = '**/{node_modules,.git,.hg,.svn,.vscode-test,.worktrees,dist,build,coverage,out,target}/**';
 
 export type UpdateJob =
   | { type: 'create'; relativePath: string; filePath?: string }
@@ -19,6 +19,8 @@ const EXCLUDED_PATH_SEGMENTS = new Set([
   '.git',
   '.hg',
   '.svn',
+  '.vscode-test',
+  '.worktrees',
   'dist',
   'build',
   'coverage',

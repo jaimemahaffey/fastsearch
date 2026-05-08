@@ -18,6 +18,8 @@ suite('workspaceWatcher', () => {
   test('filters update jobs under excluded heavy paths', () => {
     assert.equal(shouldProcessUpdateJob({ type: 'change', relativePath: 'node_modules/pkg/index.js' }), false);
     assert.equal(shouldProcessUpdateJob({ type: 'change', relativePath: 'dist/extension.js' }), false);
+    assert.equal(shouldProcessUpdateJob({ type: 'change', relativePath: '.vscode-test/user-data/CachedData/chrome/js/cache_0' }), false);
+    assert.equal(shouldProcessUpdateJob({ type: 'change', relativePath: '.worktrees/add-command-mode-cycling/src/extension.ts' }), false);
     assert.equal(shouldProcessUpdateJob({ type: 'change', relativePath: 'src/extension.ts' }), true);
   });
 

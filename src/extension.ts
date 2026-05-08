@@ -262,9 +262,13 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   output.appendLine(`fastIndexer enabled=${config.enabled}`);
-  const cycleSearchMode = createCycleSearchModeCommand(fileIndex, textIndex, symbolIndex, getConfig);
+  const cycleLog = (message: string): void => {
+    output.appendLine(`[cycle] ${message}`);
+  };
+  const cycleSearchMode = createCycleSearchModeCommand(fileIndex, textIndex, symbolIndex, getConfig, cycleLog);
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.cycleSearchMode', async () => {
+    cycleLog('command invoked');
     if (!getConfig().enabled) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;

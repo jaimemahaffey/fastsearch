@@ -882,7 +882,7 @@ suite('extension activation', () => {
 
     assert.equal(findFilesCalls.length, 1);
     assert.equal(findFilesCalls[0]?.include, '**/*');
-    assert.equal(findFilesCalls[0]?.exclude, '{**/{node_modules,.git,.hg,.svn,dist,build,coverage,out,target}/**,**/node_modules/**,**/.git/**}');
+    assert.equal(findFilesCalls[0]?.exclude, '{**/{node_modules,.git,.hg,.svn,.vscode-test,.worktrees,dist,build,coverage,out,target}/**,**/node_modules/**,**/.git/**}');
   });
 
   test('persists a fresh snapshot after a successful initial build', async () => {
@@ -1221,7 +1221,7 @@ suite('extension activation', () => {
     assert.deepEqual(findFilesCalls, [
       {
         include: '{src/**/*.ts,lib/**/*.ts}',
-        exclude: '{**/{node_modules,.git,.hg,.svn,dist,build,coverage,out,target}/**,**/*.snap}'
+        exclude: '{**/{node_modules,.git,.hg,.svn,.vscode-test,.worktrees,dist,build,coverage,out,target}/**,**/*.snap}'
       }
     ]);
   });

@@ -57,6 +57,10 @@
       "keybindings": [
         {
           "command": "fastIndexer.cycleSearchMode",
+          "key": "ctrl+t"
+        },
+        {
+          "command": "fastIndexer.cycleSearchMode",
           "key": "ctrl+t",
           "when": "editorTextFocus"
         },
@@ -64,6 +68,16 @@
           "command": "fastIndexer.cycleSearchMode",
           "key": "ctrl+t",
           "when": "inQuickInput"
+        },
+        {
+          "command": "fastIndexer.cycleSearchMode",
+          "key": "ctrl+t",
+          "when": "inQuickOpen"
+        },
+        {
+          "command": "fastIndexer.cycleSearchMode",
+          "key": "ctrl+t",
+          "when": "fastIndexer.cyclePickerActive"
         },
         {
           "command": "fastIndexer.cycleSearchMode",

@@ -10,6 +10,8 @@ type CommandSearchPresentation = {
   title?: string;
   placeholder?: string;
   onDidHide?: () => void;
+  debugLog?: (message: string) => void;
+  activeContextKey?: string;
 };
 
 type CommandSearchDependencies = {
@@ -42,6 +44,8 @@ export async function goToText(
     noResultsMessage: (query) => `No indexed text matched "${query}".`,
     completionStyleResults: resolvedBehavior.completionStyleResults,
     fuzzySearch: resolvedBehavior.fuzzySearch,
+    debugLog: presentation.debugLog,
+    activeContextKey: presentation.activeContextKey,
     loadCandidates: async (query, fuzzySearch) => {
       const builtInCandidates = textIndex.searchForCommand(query, fuzzySearch).map(toTextSearchCandidate);
       const ripgrepCandidates = (await searchTextWithRipgrep(

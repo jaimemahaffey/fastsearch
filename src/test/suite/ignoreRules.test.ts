@@ -197,6 +197,14 @@ generated/
       matcher.ignores(path.join('c:\\workspace', 'app', 'node_modules', 'pkg', 'index.js'), 'node_modules/pkg/index.js'),
       true
     );
+    assert.equal(
+      matcher.ignores(path.join('c:\\workspace', 'app', '.vscode-test', 'user-data', 'CachedData', 'chrome', 'js', 'cache_0'), '.vscode-test/user-data/CachedData/chrome/js/cache_0'),
+      true
+    );
+    assert.equal(
+      matcher.ignores(path.join('c:\\workspace', 'app', '.worktrees', 'add-command-mode-cycling', '.vscode-test', 'resources', 'app', 'node_modules.asar'), '.worktrees/add-command-mode-cycling/.vscode-test/resources/app/node_modules.asar'),
+      true
+    );
   });
 
   test('applies shared ignore files relative to the workspace root even when the file lives in a nested config directory', () => {

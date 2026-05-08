@@ -75,8 +75,8 @@ suite('activation', () => {
 
     assert.deepEqual(
       cycleBindings.map((binding: { when?: string; }) => binding.when).sort(),
-      ['editorTextFocus', 'inQuickInput', 'terminalFocus'],
-      'expected Ctrl+T bindings for editor, custom quick input, and terminal focus'
+      ['editorTextFocus', 'fastIndexer.cyclePickerActive', 'inQuickInput', 'inQuickOpen', 'terminalFocus', undefined],
+      'expected Ctrl+T bindings for global, editor, cycle picker, VS Code quick input/open, and terminal focus'
     );
   });
 });
