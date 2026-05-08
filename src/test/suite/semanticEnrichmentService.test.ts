@@ -299,6 +299,112 @@ suite('semantic enrichment service', () => {
     const metadata2 = semanticIndex.get('test.ts', key2);
     assert.strictEqual(metadata2, undefined, 'Second symbol should not be enriched after clear');
   });
+
+  test('clear empties the queue and clears stored metadata from SemanticIndex', async () => {
+    const semanticIndex = new SemanticIndex();
+    const providers = createMockProviders();
+    
+    const service = new SemanticEnrichmentService(semanticIndex, {
+      enabled: true,
+      concurrency: 1,
+      timeoutMs: 5000,
+      providers,
+      now: () => 1000
+    });
+
+    const symbols: SymbolRecord[] = [
+      {
+        name: 'myFunction',
+        kind: 1,
+        containerName: undefined,
+        uri: 'file:///test.ts',
+        startLine: 10,
+        startColumn: 5,
+        approximate: false
+      }
+    ];
+
+    // Enqueue and let it complete
+    service.enqueueFile('test.ts', symbols, 1);
+    await service.idle();
+
+    // Verify metadata was written
+    const key = createSymbolSemanticKey(symbols[0]);
+    const metadataBefore = semanticIndex.get('test.ts', key);
+    assert.ok(metadataBefore, 'Metadata should exist before clear');
+
+    // Now clear
+    service.clear();
+
+    // Verify metadata was cleared from SemanticIndex
+    const metadataAfter = semanticIndex.get('test.ts', key);
+    assert.strictEqual(metadataAfter, undefined, 'Metadata should be cleared from SemanticIndex');
+  });
+
+  test('timeoutMs = 0 disables timeout and allows enrichment to complete', async () => {
+    const semanticIndex = new SemanticIndex();
+    let time = 1000;
+    
+    // Create providers that take some time but will eventually complete
+    let definitionsCallCount = 0;
+    const providers = {
+      getDefinitions: async (uri: any, position: any): Promise<ProviderCallResult<SemanticTarget[]>> => {
+        definitionsCallCount++;
+        // Simulate work that takes longer than 0ms
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return { ok: true, value: [{ uri: 'file:///def.ts', line: 5, column: 10 }] };
+      },
+      getDeclarations: async (uri: any, position: any): Promise<ProviderCallResult<SemanticTarget[]>> => {
+        return { ok: true, value: [] };
+      },
+      getTypeDefinitions: async (uri: any, position: any): Promise<ProviderCallResult<SemanticTarget[]>> => {
+        return { ok: true, value: [] };
+      },
+      getImplementations: async (uri: any, position: any): Promise<DiscoveryResult[]> => {
+        return [];
+      },
+      getReferences: async (uri: any, position: any): Promise<DiscoveryResult[]> => {
+        return [];
+      },
+      getHoverSummary: async (uri: any, position: any): Promise<ProviderCallResult<string | undefined>> => {
+        return { ok: true, value: undefined };
+      }
+    };
+    
+    const service = new SemanticEnrichmentService(semanticIndex, {
+      enabled: true,
+      concurrency: 1,
+      timeoutMs: 0, // Timeout disabled
+      providers,
+      now: () => time
+    });
+
+    const symbols: SymbolRecord[] = [
+      {
+        name: 'myFunction',
+        kind: 1,
+        containerName: undefined,
+        uri: 'file:///test.ts',
+        startLine: 10,
+        startColumn: 5,
+        approximate: false
+      }
+    ];
+
+    service.enqueueFile('test.ts', symbols, 1);
+    await service.idle();
+
+    // Verify the provider was called and completed successfully
+    assert.strictEqual(definitionsCallCount, 1, 'Provider should have been called once');
+
+    // Metadata should be enriched, not timed out
+    const key = createSymbolSemanticKey(symbols[0]);
+    const metadata = semanticIndex.get('test.ts', key);
+    assert.ok(metadata, 'Metadata should exist');
+    assert.strictEqual(metadata.status, 'enriched', 'Status should be enriched, not timeout');
+    assert.strictEqual(metadata.confidence, 1);
+    assert.deepStrictEqual(metadata.definition, { uri: 'file:///def.ts', line: 5, column: 10 });
+  });
 });
 
 function createMockProviders() {

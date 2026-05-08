@@ -68,6 +68,7 @@ export class SemanticEnrichmentService {
 
   clear(): void {
     this.queue.length = 0;
+    this.semanticIndex.clear();
   }
 
   async idle(): Promise<void> {
@@ -219,6 +220,9 @@ class TimeoutError extends Error {
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  if (timeoutMs <= 0) {
+    return promise;
+  }
   return Promise.race([
     promise,
     new Promise<T>((_, reject) =>
