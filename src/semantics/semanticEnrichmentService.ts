@@ -35,8 +35,7 @@ export class SemanticEnrichmentService {
   private readonly queue: WorkItem[] = [];
   private readonly cancelledGenerations = new Set<number>();
   private activeWorkers = 0;
-  private drainPromise: Promise<void> | null = null;
-  private drainResolve: (() => void) | null = null;
+  private idleResolvers: Array<() => void> = [];
 
   constructor(semanticIndex: SemanticIndex, options: SemanticEnrichmentServiceOptions) {
     this.semanticIndex = semanticIndex;
@@ -69,15 +68,19 @@ export class SemanticEnrichmentService {
   clear(): void {
     this.queue.length = 0;
     this.semanticIndex.clear();
+    this.cancelledGenerations.clear();
   }
 
   async idle(): Promise<void> {
-    while (this.queue.length > 0 || this.activeWorkers > 0) {
-      if (this.drainPromise) {
-        await this.drainPromise;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    // If already idle, return immediately
+    if (this.queue.length === 0 && this.activeWorkers === 0) {
+      return;
     }
+    
+    // Wait for work to complete by registering a resolver
+    return new Promise<void>((resolve) => {
+      this.idleResolvers.push(resolve);
+    });
   }
 
   private drain(): void {
@@ -120,12 +123,21 @@ export class SemanticEnrichmentService {
       this.options.onError(`Error enriching symbol ${item.symbol.name}: ${error}`);
     } finally {
       this.activeWorkers--;
-      if (this.activeWorkers === 0 && this.queue.length === 0 && this.drainResolve) {
-        this.drainResolve();
-        this.drainPromise = null;
-        this.drainResolve = null;
+      
+      // Notify idle waiters when work is complete
+      if (this.activeWorkers === 0 && this.queue.length === 0) {
+        this.notifyIdle();
       }
+      
       this.drain();
+    }
+  }
+  
+  private notifyIdle(): void {
+    const resolvers = this.idleResolvers;
+    this.idleResolvers = [];
+    for (const resolve of resolvers) {
+      resolve();
     }
   }
 

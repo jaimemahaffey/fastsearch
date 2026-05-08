@@ -341,6 +341,54 @@ suite('semantic enrichment service', () => {
     assert.strictEqual(metadataAfter, undefined, 'Metadata should be cleared from SemanticIndex');
   });
 
+  test('clear clears cancelled generation tracking', async () => {
+    const semanticIndex = new SemanticIndex();
+    const providers = createMockProviders();
+    
+    const service = new SemanticEnrichmentService(semanticIndex, {
+      enabled: true,
+      concurrency: 1,
+      timeoutMs: 5000,
+      providers,
+      now: () => 1000
+    });
+
+    const symbols: SymbolRecord[] = [
+      {
+        name: 'myFunction',
+        kind: 1,
+        containerName: undefined,
+        uri: 'file:///test.ts',
+        startLine: 10,
+        startColumn: 5,
+        approximate: false
+      }
+    ];
+
+    // Cancel generation 1 and 2
+    service.cancelGeneration(1);
+    service.cancelGeneration(2);
+    
+    // Enqueue work for cancelled generation 1 - should be skipped
+    service.enqueueFile('test.ts', symbols, 1);
+    await service.idle();
+    
+    const key = createSymbolSemanticKey(symbols[0]);
+    const metadataBefore = semanticIndex.get('test.ts', key);
+    assert.strictEqual(metadataBefore, undefined, 'Gen 1 should be cancelled, no metadata');
+    
+    // Clear everything including cancelled generations
+    service.clear();
+    
+    // Now enqueue work for previously-cancelled generation 1 - should succeed after clear
+    service.enqueueFile('test.ts', symbols, 1);
+    await service.idle();
+    
+    const metadataAfter = semanticIndex.get('test.ts', key);
+    assert.ok(metadataAfter, 'Gen 1 should work after clear removes cancelled tracking');
+    assert.strictEqual(metadataAfter.status, 'enriched');
+  });
+
   test('timeoutMs = 0 disables timeout and allows enrichment to complete', async () => {
     const semanticIndex = new SemanticIndex();
     let time = 1000;
