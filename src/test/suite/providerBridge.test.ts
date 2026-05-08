@@ -132,6 +132,14 @@ suite('providerBridge', () => {
           ok: false,
           error: 'provider exploded'
         });
+        assert.deepEqual(await getDeclarations(sourceUri, new vscode.Position(0, 0)), {
+          ok: false,
+          error: 'provider exploded'
+        });
+        assert.deepEqual(await getTypeDefinitions(sourceUri, new vscode.Position(0, 0)), {
+          ok: false,
+          error: 'provider exploded'
+        });
       } finally {
         restoreProperty(executePatch);
       }
@@ -153,6 +161,62 @@ suite('providerBridge', () => {
         assert.deepEqual(await getHoverSummary(sourceUri, new vscode.Position(0, 0)), {
           ok: true,
           value: 'class Alpha Creates alpha values.'
+        });
+      } finally {
+        restoreProperty(executePatch);
+      }
+    });
+
+    test('handles deprecated MarkedString object format in hover content', async () => {
+      const sourceUri = vscode.Uri.file('c:\\workspace\\src\\source.ts');
+      const executePatch = patchProperty(vscode.commands, 'executeCommand', (async (command: string) => {
+        assert.equal(command, 'vscode.executeHoverProvider');
+        return [{
+          contents: [
+            { language: 'typescript', value: 'interface User' }
+          ]
+        }];
+      }) as typeof vscode.commands.executeCommand);
+
+      try {
+        assert.deepEqual(await getHoverSummary(sourceUri, new vscode.Position(0, 0)), {
+          ok: true,
+          value: 'typescript interface User'
+        });
+      } finally {
+        restoreProperty(executePatch);
+      }
+    });
+
+    test('returns undefined when hover content is empty', async () => {
+      const sourceUri = vscode.Uri.file('c:\\workspace\\src\\source.ts');
+      const executePatch = patchProperty(vscode.commands, 'executeCommand', (async (command: string) => {
+        assert.equal(command, 'vscode.executeHoverProvider');
+        return [{
+          contents: []
+        }];
+      }) as typeof vscode.commands.executeCommand);
+
+      try {
+        assert.deepEqual(await getHoverSummary(sourceUri, new vscode.Position(0, 0)), {
+          ok: true,
+          value: undefined
+        });
+      } finally {
+        restoreProperty(executePatch);
+      }
+    });
+
+    test('returns explicit failures when hover provider throws', async () => {
+      const sourceUri = vscode.Uri.file('c:\\workspace\\src\\source.ts');
+      const executePatch = patchProperty(vscode.commands, 'executeCommand', (async () => {
+        throw new Error('hover provider exploded');
+      }) as typeof vscode.commands.executeCommand);
+
+      try {
+        assert.deepEqual(await getHoverSummary(sourceUri, new vscode.Position(0, 0)), {
+          ok: false,
+          error: 'hover provider exploded'
         });
       } finally {
         restoreProperty(executePatch);
