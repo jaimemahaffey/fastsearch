@@ -169,6 +169,23 @@
           "type": "boolean",
           "default": false,
           "description": "Allow fast indexer commands to use fzf as an optional interactive narrowing provider when available."
+        },
+        "fastIndexer.semanticEnrichment": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable background semantic enrichment using VS Code language providers."
+        },
+        "fastIndexer.semanticConcurrency": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "Maximum number of concurrent semantic provider calls used by background enrichment."
+        },
+        "fastIndexer.semanticTimeoutMs": {
+          "type": "number",
+          "default": 750,
+          "minimum": 0,
+          "description": "Timeout in milliseconds for each background semantic provider request. Use 0 to disable the timeout."
         }
       }
     }

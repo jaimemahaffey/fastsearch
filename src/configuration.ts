@@ -14,6 +14,9 @@ export type FastIndexerConfig = {
   completionStyleResults: boolean;
   useRipgrep: boolean;
   useFzf: boolean;
+  semanticEnrichment: boolean;
+  semanticConcurrency: number;
+  semanticTimeoutMs: number;
 };
 
 const REBUILD_KEYS = new Set([
@@ -21,7 +24,10 @@ const REBUILD_KEYS = new Set([
   'fastIndexer.exclude',
   'fastIndexer.ignoreFiles',
   'fastIndexer.sharedIgnoreFiles',
-  'fastIndexer.maxFileSizeKb'
+  'fastIndexer.maxFileSizeKb',
+  'fastIndexer.semanticEnrichment',
+  'fastIndexer.semanticConcurrency',
+  'fastIndexer.semanticTimeoutMs'
 ]);
 
 const DEFAULT_INCLUDE = ['**/*'];
@@ -44,7 +50,10 @@ export function readConfig(): FastIndexerConfig {
     fuzzySearch: config.get<boolean>('fuzzySearch', true),
     completionStyleResults: config.get<boolean>('completionStyleResults', true),
     useRipgrep: config.get<boolean>('useRipgrep', true),
-    useFzf: config.get<boolean>('useFzf', false)
+    useFzf: config.get<boolean>('useFzf', false),
+    semanticEnrichment: config.get<boolean>('semanticEnrichment', true),
+    semanticConcurrency: Math.max(1, config.get<number>('semanticConcurrency', 2)),
+    semanticTimeoutMs: Math.max(0, config.get<number>('semanticTimeoutMs', 750))
   };
 }
 

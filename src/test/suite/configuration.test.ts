@@ -44,8 +44,38 @@ suite('configuration', () => {
         fuzzySearch: false,
         completionStyleResults: false,
         useRipgrep: false,
-        useFzf: true
+        useFzf: true,
+        semanticEnrichment: true,
+        semanticConcurrency: 2,
+        semanticTimeoutMs: 750
       });
+    } finally {
+      restoreProperty(configPatch);
+    }
+  });
+
+  test('reads semantic enrichment configuration values with sane defaults', () => {
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            semanticEnrichment: false,
+            semanticConcurrency: -3,
+            semanticTimeoutMs: -10
+          };
+
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+
+    try {
+      const config = readConfig();
+
+      assert.equal(config.semanticEnrichment, false);
+      assert.equal(config.semanticConcurrency, 1);
+      assert.equal(config.semanticTimeoutMs, 0);
     } finally {
       restoreProperty(configPatch);
     }
@@ -80,7 +110,10 @@ suite('configuration', () => {
       'fastIndexer.exclude',
       'fastIndexer.ignoreFiles',
       'fastIndexer.sharedIgnoreFiles',
-      'fastIndexer.maxFileSizeKb'
+      'fastIndexer.maxFileSizeKb',
+      'fastIndexer.semanticEnrichment',
+      'fastIndexer.semanticConcurrency',
+      'fastIndexer.semanticTimeoutMs'
     ];
 
     for (const watchedKey of watchedKeys) {
