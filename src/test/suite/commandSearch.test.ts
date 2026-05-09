@@ -100,6 +100,7 @@ suite('commandSearch', () => {
   });
 
   test('collects results from available providers only', async () => {
+    const vscode = require('vscode');
     const calls: string[] = [];
     const providers: Array<CommandSearchProvider<{ query: string }>> = [
       {
@@ -110,7 +111,7 @@ suite('commandSearch', () => {
           return [{
             source: 'file',
             label: 'main.ts',
-            detail: 'file:///workspace/src/app/main.ts',
+            detail: vscode.Uri.parse('file:///workspace/src/app/main.ts').fsPath,
             filterText: 'main.ts',
             uri: 'file:///workspace/src/app/main.ts',
             approximate: false
@@ -135,11 +136,12 @@ suite('commandSearch', () => {
   });
 
   test('supports non-contiguous fuzzy matches when ranking command candidates', () => {
+    const vscode = require('vscode');
     const results = rankCommandSearchCandidates('gtf', [
       {
         source: 'file',
         label: 'Go To Text',
-        detail: 'file:///workspace/src/text.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/text.ts').fsPath,
         filterText: 'go to text src/text.ts',
         uri: 'file:///workspace/src/text.ts',
         approximate: false
@@ -147,7 +149,7 @@ suite('commandSearch', () => {
       {
         source: 'file',
         label: 'Go To File',
-        detail: 'file:///workspace/src/file.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/file.ts').fsPath,
         filterText: 'go to file src/file.ts',
         uri: 'file:///workspace/src/file.ts',
         approximate: false
@@ -158,11 +160,12 @@ suite('commandSearch', () => {
   });
 
   test('orders exact, prefix, and substring matches by strength', () => {
+    const vscode = require('vscode');
     const results = rankCommandSearchCandidates('file', [
       {
         source: 'file',
         label: 'Go To File',
-        detail: 'file:///workspace/src/go-to-file.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/go-to-file.ts').fsPath,
         filterText: 'go to file',
         uri: 'file:///workspace/src/go-to-file.ts',
         approximate: false
@@ -170,7 +173,7 @@ suite('commandSearch', () => {
       {
         source: 'file',
         label: 'File Search',
-        detail: 'file:///workspace/src/file-search.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/file-search.ts').fsPath,
         filterText: 'file search',
         uri: 'file:///workspace/src/file-search.ts',
         approximate: false
@@ -178,7 +181,7 @@ suite('commandSearch', () => {
       {
         source: 'file',
         label: 'file',
-        detail: 'file:///workspace/src/file.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/file.ts').fsPath,
         filterText: 'file',
         uri: 'file:///workspace/src/file.ts',
         approximate: false
