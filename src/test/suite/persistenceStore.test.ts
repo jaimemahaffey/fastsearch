@@ -28,7 +28,7 @@ type PersistedTextEntry = {
 
 type PersistedSymbolEntry = {
   relativePath: string;
-  contentHash: string;
+  contentHash: string | null;
   symbols: SymbolRecord[];
 };
 

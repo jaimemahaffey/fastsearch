@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { compareOrdinal } from './ordinalCompare';
 
 export type MerkleLeafRecord = {
   relativePath: string;
@@ -41,7 +42,7 @@ function hashDirectChildren(entries: Array<[string, string]>): string {
   return hashParts(
     entries
       .slice()
-      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+      .sort(([leftName], [rightName]) => compareOrdinal(leftName, rightName))
       .map(([name, hash]) => `${name}:${hash}`)
   );
 }
@@ -60,7 +61,7 @@ export function buildMerkleTree(leaves: MerkleLeafRecord[]): MerkleTreeSnapshot 
     }
     seenPaths.add(leaf.relativePath);
   }
-  const sortedLeaves = [...normalizedLeaves].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  const sortedLeaves = [...normalizedLeaves].sort((left, right) => compareOrdinal(left.relativePath, right.relativePath));
   const leavesByPath = new Map(sortedLeaves.map((leaf) => [leaf.relativePath, leaf]));
   const root = createNode();
 

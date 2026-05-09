@@ -1,3 +1,5 @@
+import { compareOrdinal } from './ordinalCompare';
+
 export type PersistedMerkleLeafEntry = {
   relativePath: string;
   uri: string;
@@ -13,6 +15,6 @@ export type PersistedMerkleSnapshot = {
 
 export function toPersistedSubtreeHashes(subtreeHashes: Map<string, string>): Array<{ path: string; hash: string }> {
   return [...subtreeHashes.entries()]
-    .sort((left, right) => left[0].localeCompare(right[0]))
+    .sort((left, right) => compareOrdinal(left[0], right[0]))
     .map(([path, hash]) => ({ path, hash }));
 }

@@ -20,7 +20,7 @@ export type PersistedTextEntry = {
 
 export type PersistedSymbolEntry = {
   relativePath: string;
-  contentHash: string;
+  contentHash: string | null;
   symbols: SymbolRecord[];
 };
 

@@ -5,6 +5,7 @@ import {
   type MerkleLeafRecord
 } from '../../core/merkleTree';
 import { hashContent } from '../../core/contentHash';
+import { toPersistedSubtreeHashes } from '../../core/merkleSnapshot';
 
 function leafRecord(relativePath: string, content: string): MerkleLeafRecord {
   const normalizedPath = relativePath.replace(/\\/g, '/');
@@ -20,7 +21,7 @@ function hashDirectChildren(entries: Array<[string, string]>): string {
   return hashContent(
     entries
       .slice()
-      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+      .sort(([leftName], [rightName]) => leftName < rightName ? -1 : leftName > rightName ? 1 : 0)
       .map(([name, hash]) => `${name}:${hash}`)
       .join('\n')
   );
@@ -113,6 +114,35 @@ suite('merkleTree', () => {
     assert.equal(forward.subtreeHashes.get('src'), srcHash);
     assert.equal(reversed.subtreeHashes.get('src/app'), appHash);
     assert.equal(reversed.subtreeHashes.get('src'), srcHash);
+  });
+
+  test('buildMerkleTree orders non-ASCII path segments with locale-independent comparisons', () => {
+    const zebra = leafRecord('src/z.ts', 'zebra\n');
+    const umlaut = leafRecord('src/ä.ts', 'umlaut\n');
+
+    const tree = buildMerkleTree([umlaut, zebra]);
+    const srcHash = hashDirectChildren([
+      ['z.ts', zebra.contentHash],
+      ['ä.ts', umlaut.contentHash]
+    ]);
+    const rootHash = hashDirectChildren([
+      ['src', srcHash]
+    ]);
+
+    assert.equal(tree.subtreeHashes.get('src'), srcHash);
+    assert.equal(tree.rootHash, rootHash);
+  });
+
+  test('toPersistedSubtreeHashes uses locale-independent ordering', () => {
+    const subtreeHashes = new Map<string, string>([
+      ['ä', 'umlaut'],
+      ['z', 'zebra']
+    ]);
+
+    assert.deepEqual(toPersistedSubtreeHashes(subtreeHashes), [
+      { path: 'z', hash: 'zebra' },
+      { path: 'ä', hash: 'umlaut' }
+    ]);
   });
 
   test('diffMerkleLeaves classifies unchanged, changed, added, and removed paths', () => {

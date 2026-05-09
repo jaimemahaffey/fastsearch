@@ -766,7 +766,7 @@ function createPersistedWorkspaceSnapshot(
     textIndex: persistedTextEntries,
     symbolIndex: symbolIndex.allByFile().map((entry) => ({
       relativePath: entry.relativePath,
-      contentHash: contentHashByPath.get(entry.relativePath) ?? hashContent(''),
+      contentHash: contentHashByPath.get(entry.relativePath) ?? null,
       symbols: entry.symbols
     })),
     semanticIndex: semanticIndex.allByFile()
