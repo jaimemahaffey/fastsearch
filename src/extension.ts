@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { getDocumentSymbols } from './bridge/providerBridge';
+import { getDeclarations, getDefinitions, getDocumentSymbols, getHoverSummary, getImplementationsAt, getReferencesAt, getTypeDefinitions } from './bridge/providerBridge';
 import { createCycleSearchModeCommand } from './commands/cycleSearchMode';
 import { findImplementations } from './commands/findImplementations';
 import { findUsages } from './commands/findUsages';
@@ -16,6 +16,7 @@ import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, ty
 import { FileIndex } from './indexes/fileIndex';
 import { SymbolIndex } from './indexes/symbolIndex';
 import { TextIndex } from './indexes/textIndex';
+import { SemanticEnrichmentService } from './semantics/semanticEnrichmentService';
 import { SemanticIndex } from './semantics/semanticIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 import type { FastIndexerConfig } from './configuration';
@@ -469,6 +470,7 @@ export function activate(context: vscode.ExtensionContext): void {
           fileIndex.clear();
           symbolIndex.clear();
           textIndex.clear();
+          semanticIndex.clear();
           coordinator.markStale();
           initialFileIndexBuildPending = false;
           output.appendLine('Background indexing disabled by configuration.');
