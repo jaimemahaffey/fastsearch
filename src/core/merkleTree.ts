@@ -53,6 +53,13 @@ export function buildMerkleTree(leaves: MerkleLeafRecord[]): MerkleTreeSnapshot 
       ? leaf
       : { ...leaf, relativePath };
   });
+  const seenPaths = new Set<string>();
+  for (const leaf of normalizedLeaves) {
+    if (seenPaths.has(leaf.relativePath)) {
+      throw new Error(`Cannot build Merkle tree: duplicate normalized leaf path "${leaf.relativePath}"`);
+    }
+    seenPaths.add(leaf.relativePath);
+  }
   const sortedLeaves = [...normalizedLeaves].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   const leavesByPath = new Map(sortedLeaves.map((leaf) => [leaf.relativePath, leaf]));
   const root = createNode();

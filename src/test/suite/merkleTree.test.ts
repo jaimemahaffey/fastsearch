@@ -66,6 +66,21 @@ suite('merkleTree', () => {
     assert.deepEqual(windows.leavesByPath.get('src/app/service.ts'), forward.leavesByPath.get('src/app/service.ts'));
   });
 
+  test('buildMerkleTree rejects duplicate normalized leaf paths', () => {
+    assert.throws(
+      () => buildMerkleTree([
+        leafRecord('src/app/main.ts', 'const alpha = 1;\n'),
+        {
+          relativePath: 'src\\app\\main.ts',
+          uri: 'file:///workspace/src/app/main.ts',
+          contentHash: hashContent('const beta = 2;\n'),
+          size: 'const beta = 2;\n'.length
+        }
+      ]),
+      /duplicate normalized leaf path/i
+    );
+  });
+
   test('buildMerkleTree derives subtree hashes from sorted direct children', () => {
     const alpha = leafRecord('src/app/alpha.ts', 'alpha\n');
     const nested = leafRecord('src/app/nested/file.ts', 'nested\n');
