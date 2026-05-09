@@ -10,3 +10,10 @@ export type FileRecord = {
 export type WorkspacePersistence = {
   workspaceId: string;
 };
+
+export type IndexLayer = 'file' | 'text' | 'symbol' | 'semantic';
+
+export type PersistedLayerState = {
+  availableLayers: IndexLayer[];
+  activeLayer?: IndexLayer;
+};
