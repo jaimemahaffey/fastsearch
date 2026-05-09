@@ -124,11 +124,22 @@ export function toDiscoverySearchCandidate(
   source: 'usage' | 'implementation',
   result: DiscoveryResult
 ): CommandSearchCandidate {
+  // For file-backed URIs, normalize detail to display path, but keep label/filterText as raw URI
+  let detail = result.uri;
+  try {
+    if (result.uri.startsWith('file:///')) {
+      // Remove file:/// and any workspace prefix for display
+      const match = result.uri.match(/^file:\/\/(?:[^\/]+)?\/?(.*)$/);
+      if (match && match[1]) {
+        detail = decodeURIComponent(match[1]);
+      }
+    }
+  } catch {}
   return {
     source,
     label: `${result.uri}:${result.line + 1}`,
     description: undefined,
-    detail: result.uri,
+    detail,
     filterText: result.uri,
     uri: result.uri,
     line: result.line,

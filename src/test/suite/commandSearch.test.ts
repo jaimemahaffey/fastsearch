@@ -70,10 +70,10 @@ suite('commandSearch', () => {
     });
     assert.deepEqual(toDiscoverySearchCandidate('usage', discoveryResult), {
       source: 'usage',
-      label: 'file:///workspace/src/app/main.ts:15',
+      label: 'file:///workspace/src/app/main.ts:15', // discovery label stays raw URI
       description: undefined,
-      detail: fileRecord.uri,
-      filterText: 'file:///workspace/src/app/main.ts',
+      detail: 'workspace/src/app/main.ts', // display path normalization for detail
+      filterText: 'file:///workspace/src/app/main.ts', // filterText stays raw URI
       uri: fileRecord.uri,
       line: 14,
       approximate: true
