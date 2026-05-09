@@ -496,7 +496,15 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  context.subscriptions.push(output);
+  context.subscriptions.push(
+    output,
+    {
+      dispose: () => {
+        semanticService.cancelGeneration(buildGeneration);
+        semanticService.clear();
+      }
+    }
+  );
 }
 
 async function buildWorkspaceIndexes(
