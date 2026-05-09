@@ -150,4 +150,41 @@ suite('PersistenceStore', () => {
       await fs.rm(rootPath, { recursive: true, force: true });
     }
   });
+
+  test('writes and reads available layer metadata with the workspace snapshot', async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'fast-indexer-persist-'));
+    const store = new PersistenceStore(tempRoot);
+
+    const snapshot: PersistedWorkspaceSnapshot = {
+      metadata: {
+        schemaVersion: 2,
+        workspaceId: 'workspace-id',
+        configHash: 'config-hash',
+        layerState: {
+          availableLayers: ['file', 'text'],
+          activeLayer: 'symbol'
+        }
+      },
+      merkle: {
+        rootHash: 'root-hash',
+        subtreeHashes: [],
+        leaves: []
+      },
+      fileIndex: [],
+      textIndex: [],
+      symbolIndex: []
+    };
+
+    try {
+      await store.writeWorkspaceSnapshot('workspace-id', snapshot);
+      const restored = await store.readWorkspaceSnapshot('workspace-id');
+
+      assert.deepEqual(restored?.metadata.layerState, {
+        availableLayers: ['file', 'text'],
+        activeLayer: 'symbol'
+      });
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
