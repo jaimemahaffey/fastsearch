@@ -67,6 +67,22 @@ suite('SymbolIndex', () => {
     assert.equal(index.isEmpty(), true);
     assert.deepEqual(index.search('UserService'), []);
   });
+
+  test('delete removes symbols for a single file', () => {
+    const index = new SymbolIndex();
+
+    index.replaceForFile('src/service.ts', [
+      createSymbol({ name: 'UserService', approximate: false })
+    ]);
+    index.replaceForFile('src/legacy.ts', [
+      createSymbol({ name: 'LegacyService', approximate: false, uri: 'file:///c:/ws/src/legacy.ts' })
+    ]);
+
+    index.delete('src/legacy.ts');
+
+    assert.deepEqual(index.search('Legacy').map((symbol) => symbol.name), []);
+    assert.deepEqual(index.search('Service').map((symbol) => symbol.name), ['UserService']);
+  });
 });
 
 function createSymbol(overrides: Partial<SymbolRecord> & Pick<SymbolRecord, 'name'>): SymbolRecord {

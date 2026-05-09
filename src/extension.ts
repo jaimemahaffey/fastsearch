@@ -9,6 +9,7 @@ import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
+import { createIndexBuildPlan } from './core/indexBuildPlanner';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
 import { createLayerAvailability, hasLayer, markLayerActive, markLayerAvailable, toPersistedLayerState } from './core/indexLayerState';
 import { runPhaseJobs } from './core/indexPhaseRunner';
@@ -108,6 +109,7 @@ export function activate(context: vscode.ExtensionContext): void {
         fileIndex,
         symbolIndex,
         textIndex,
+        semanticIndex,
         semanticService,
         generation,
         currentConfig,
@@ -603,6 +605,7 @@ async function buildWorkspaceIndexes(
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
+  semanticIndex: SemanticIndex,
   semanticService: SemanticEnrichmentService,
   generation: number,
   config: FastIndexerConfig,
@@ -632,20 +635,29 @@ async function buildWorkspaceIndexes(
         relativePath: vscode.workspace.asRelativePath(file, true)
       }))
       .filter((candidate) => !ignoreMatcher.ignores(candidate.uri.fsPath, candidate.relativePath));
+    const plan = createIndexBuildPlan(candidates, {
+      file: new Set(),
+      text: new Set(),
+      symbol: new Set()
+    });
 
     const skippedFiles = files.length - candidates.length;
+    const reusedFileEntries = candidates.length - plan.filePhase.length;
+    const reusedTextEntries = candidates.length - plan.textPhase.length;
+    const reusedSymbolEntries = candidates.length - plan.symbolPhase.length;
     let symbolTimeouts = 0;
     buildStatus.setTotalFiles(progressToken, files.length);
+    pruneRestoredWorkspaceEntries(fileIndex, textIndex, symbolIndex, semanticIndex, candidates);
     buildStatus.advance(progressToken, {
-      processedFiles: skippedFiles,
+      processedFiles: skippedFiles + reusedFileEntries,
       skippedFiles,
       symbolTimeouts,
       currentFile: undefined,
       currentLayer: 'file'
     });
 
-    let filePhaseProcessed = skippedFiles;
-    for (const candidate of candidates) {
+    let filePhaseProcessed = skippedFiles + reusedFileEntries;
+    for (const candidate of plan.filePhase) {
       if (!shouldContinue()) {
         return false;
       }
@@ -671,7 +683,7 @@ async function buildWorkspaceIndexes(
 
     await markLayerReady('file', 'text');
     buildStatus.advance(progressToken, {
-      processedFiles: skippedFiles,
+      processedFiles: skippedFiles + reusedTextEntries,
       skippedFiles,
       symbolTimeouts,
       currentFile: undefined,
@@ -679,9 +691,9 @@ async function buildWorkspaceIndexes(
     });
     await yieldToEventLoop();
 
-    let textPhaseProcessed = skippedFiles;
+    let textPhaseProcessed = skippedFiles + reusedTextEntries;
     let stopTextPhase = false;
-    await runPhaseJobs(candidates, TEXT_PHASE_CONCURRENCY, async (candidate) => {
+    await runPhaseJobs(plan.textPhase, TEXT_PHASE_CONCURRENCY, async (candidate) => {
       if (stopTextPhase || !shouldContinue()) {
         stopTextPhase = true;
         return;
@@ -696,8 +708,11 @@ async function buildWorkspaceIndexes(
 
         if (content !== undefined) {
           textIndex.upsert(candidate.relativePath, candidate.uri.toString(), content);
+        } else {
+          textIndex.delete(candidate.relativePath);
         }
       } catch (error) {
+        textIndex.delete(candidate.relativePath);
         output.appendLine(
           `Failed to read ${candidate.relativePath} for text indexing: ${error instanceof Error ? error.message : String(error)}`
         );
@@ -722,16 +737,16 @@ async function buildWorkspaceIndexes(
 
     await markLayerReady('text', 'symbol');
     buildStatus.advance(progressToken, {
-      processedFiles: skippedFiles,
+      processedFiles: skippedFiles + reusedSymbolEntries,
       skippedFiles,
       symbolTimeouts,
       currentFile: undefined,
       currentLayer: 'symbol'
     });
 
-    let symbolPhaseProcessed = skippedFiles;
+    let symbolPhaseProcessed = skippedFiles + reusedSymbolEntries;
     let stopSymbolPhase = false;
-    await runPhaseJobs(candidates, SYMBOL_PHASE_CONCURRENCY, async (candidate) => {
+    await runPhaseJobs(plan.symbolPhase, SYMBOL_PHASE_CONCURRENCY, async (candidate) => {
       if (stopSymbolPhase || !shouldContinue()) {
         stopSymbolPhase = true;
         return;
@@ -746,7 +761,9 @@ async function buildWorkspaceIndexes(
           return;
         }
 
+        semanticIndex.delete(relativePath);
         if (symbolResult.timedOut) {
+          symbolIndex.delete(relativePath);
           symbolTimeouts += 1;
           output.appendLine(
             `Timed out reading document symbols for ${relativePath} after ${config.symbolProviderTimeoutMs}ms; continuing without symbol results.`
@@ -756,6 +773,8 @@ async function buildWorkspaceIndexes(
           semanticService.enqueueFile(relativePath, symbolResult.symbols, generation);
         }
       } catch (error) {
+        symbolIndex.delete(relativePath);
+        semanticIndex.delete(relativePath);
         output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
       }
 
@@ -881,6 +900,37 @@ function createPersistedWorkspaceSnapshot(
     symbolIndex: symbolIndex.allByFile(),
     semanticIndex: semanticIndex.allByFile()
   };
+}
+
+function pruneRestoredWorkspaceEntries(
+  fileIndex: FileIndex,
+  textIndex: TextIndex,
+  symbolIndex: SymbolIndex,
+  semanticIndex: SemanticIndex,
+  candidates: Array<{ uri: vscode.Uri; relativePath: string; }>
+): void {
+  const currentFileKeys = new Set(candidates.map((candidate) => toIndexedFileKey(candidate.uri, candidate.relativePath)));
+  const currentRelativePaths = new Set(candidates.map((candidate) => candidate.relativePath));
+
+  fileIndex.retainKeys(currentFileKeys);
+
+  for (const entry of textIndex.allContents()) {
+    if (!currentRelativePaths.has(entry.relativePath)) {
+      textIndex.delete(entry.relativePath);
+    }
+  }
+
+  for (const entry of symbolIndex.allByFile()) {
+    if (!currentRelativePaths.has(entry.relativePath)) {
+      symbolIndex.delete(entry.relativePath);
+    }
+  }
+
+  for (const entry of semanticIndex.allByFile()) {
+    if (!currentRelativePaths.has(entry.relativePath)) {
+      semanticIndex.delete(entry.relativePath);
+    }
+  }
 }
 
 function toIndexedFileKey(file: vscode.Uri, relativePath: string): string {

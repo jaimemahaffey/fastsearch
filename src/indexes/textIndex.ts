@@ -30,6 +30,10 @@ export class TextIndex {
     this.contents.clear();
   }
 
+  delete(relativePath: string): void {
+    this.contents.delete(relativePath);
+  }
+
   upsert(relativePath: string, uri: string, content: string): void {
     this.contents.set(relativePath, { uri, content });
   }

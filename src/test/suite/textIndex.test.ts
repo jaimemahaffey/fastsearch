@@ -59,6 +59,26 @@ suite('TextIndex', () => {
     assert.equal(index.isEmpty(), true);
     assert.deepEqual(index.search('alpha'), []);
   });
+
+  test('delete removes text content for a single file', () => {
+    const index = new TextIndex();
+
+    index.upsert(
+      'src/alpha.ts',
+      'file:///c:/ws/src/alpha.ts',
+      'export const alpha = 1;\nexport const beta = alpha + 1;'
+    );
+    index.upsert(
+      'src/beta.ts',
+      'file:///c:/ws/src/beta.ts',
+      'export const beta = 2;'
+    );
+
+    index.delete('src/alpha.ts');
+
+    assert.deepEqual(index.search('alpha'), []);
+    assert.deepEqual(index.search('beta').map((match) => match.relativePath), ['src/beta.ts']);
+  });
 });
 
 suite('isEligibleTextFile', () => {

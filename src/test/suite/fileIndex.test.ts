@@ -43,4 +43,15 @@ suite('FileIndex', () => {
     assert.equal(index.isEmpty(), true);
     assert.deepEqual(index.search('main'), []);
   });
+
+  test('retainKeys removes file entries that are no longer present in the workspace', () => {
+    const index = new FileIndex();
+
+    index.upsert('src/app/main.ts', 'c:/ws/src/app/main.ts');
+    index.upsert('src/app/old.ts', 'c:/ws/src/app/old.ts');
+
+    index.retainKeys(new Set(['src/app/main.ts']));
+
+    assert.deepEqual(index.search('src/app').map((entry) => entry.relativePath), ['src/app/main.ts']);
+  });
 });

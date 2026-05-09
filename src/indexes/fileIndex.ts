@@ -17,6 +17,14 @@ export class FileIndex {
     this.entries.clear();
   }
 
+  retainKeys(keys: ReadonlySet<string>): void {
+    for (const key of this.entries.keys()) {
+      if (!keys.has(key)) {
+        this.entries.delete(key);
+      }
+    }
+  }
+
   upsert(relativePath: string, uri: string, key = relativePath): void {
     this.entries.set(key, {
       relativePath,

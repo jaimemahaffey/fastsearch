@@ -32,6 +32,10 @@ export class SymbolIndex {
     this.byFile.clear();
   }
 
+  delete(relativePath: string): void {
+    this.byFile.delete(relativePath);
+  }
+
   replaceForFile(relativePath: string, symbols: SymbolRecord[]): void {
     this.byFile.set(relativePath, symbols);
   }

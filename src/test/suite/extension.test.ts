@@ -1608,6 +1608,409 @@ suite('extension activation', () => {
     }
   });
 
+  test('reconciles restored snapshots by pruning deleted files and stale per-phase entries', async () => {
+    const workspaceUri = vscode.Uri.file('c:\\workspace');
+    const keptFile = vscode.Uri.file('c:\\workspace\\src\\kept.ts');
+    const oversizedFile = vscode.Uri.file('c:\\workspace\\src\\oversized.ts');
+    const emptySymbolsFile = vscode.Uri.file('c:\\workspace\\src\\emptySymbols.ts');
+    const expectedWorkspaceId = toExpectedWorkspaceId([workspaceUri]);
+    const persistenceConfigHash = toPersistenceConfigHash({
+      semanticEnrichment: false,
+      symbolProviderTimeoutMs: 25
+    });
+    const persistedWrites: RecordedPersistedSnapshot[] = [];
+    const originalWorkspaceFs = vscode.workspace.fs;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((() => new vscode.Disposable(() => undefined)) as unknown) as typeof vscode.commands.registerCommand);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true,
+            semanticEnrichment: false,
+            symbolProviderTimeoutMs: 25
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => [
+      keptFile,
+      oversizedFile,
+      emptySymbolsFile
+    ]) as typeof vscode.workspace.findFiles);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      if (typeof pathOrUri === 'string') {
+        return pathOrUri;
+      }
+
+      const filename = path.basename(pathOrUri.fsPath);
+      return `src/${filename}`;
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', (() => ({
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    })) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const fsPatch = patchProperty(vscode.workspace, 'fs', {
+      ...originalWorkspaceFs,
+      stat: async (uri: vscode.Uri) => ({
+        type: vscode.FileType.File,
+        ctime: 0,
+        mtime: 0,
+        size: uri.fsPath.endsWith('oversized.ts') ? 1024 * 513 : 32
+      }),
+      readFile: async (uri: vscode.Uri) => Uint8Array.from(Buffer.from(`export const ${path.basename(uri.fsPath, '.ts')} = true;`))
+    } as typeof vscode.workspace.fs);
+    const executeCommandPatch = patchProperty(vscode.commands, 'executeCommand', (async (command: string, uri?: vscode.Uri) => {
+      if (command !== 'vscode.executeDocumentSymbolProvider') {
+        return undefined;
+      }
+
+      if (uri?.fsPath.endsWith('emptySymbols.ts')) {
+        return [];
+      }
+
+      return [new vscode.DocumentSymbol(
+        path.basename(uri?.fsPath ?? 'kept.ts', '.ts'),
+        '',
+        vscode.SymbolKind.Function,
+        new vscode.Range(0, 0, 0, 10),
+        new vscode.Range(0, 0, 0, 10)
+      )];
+    }) as typeof vscode.commands.executeCommand);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => ({
+        metadata: {
+          schemaVersion: 2,
+          workspaceId: expectedWorkspaceId,
+          configHash: persistenceConfigHash,
+          layerState: {
+            availableLayers: ['file', 'text', 'symbol']
+          }
+        },
+        fileIndex: [
+          {
+            relativePath: 'src/kept.ts',
+            uri: keptFile.toString(),
+            basename: 'kept.ts',
+            extension: '.ts',
+            tokens: ['src', 'kept', 'ts']
+          },
+          {
+            relativePath: 'src/removed.ts',
+            uri: vscode.Uri.file('c:\\workspace\\src\\removed.ts').toString(),
+            basename: 'removed.ts',
+            extension: '.ts',
+            tokens: ['src', 'removed', 'ts']
+          }
+        ],
+        textIndex: [
+          {
+            relativePath: 'src/kept.ts',
+            uri: keptFile.toString(),
+            content: 'export const kept = false;'
+          },
+          {
+            relativePath: 'src/oversized.ts',
+            uri: oversizedFile.toString(),
+            content: 'stale oversized content'
+          },
+          {
+            relativePath: 'src/removed.ts',
+            uri: vscode.Uri.file('c:\\workspace\\src\\removed.ts').toString(),
+            content: 'removed content'
+          }
+        ],
+        symbolIndex: [
+          {
+            relativePath: 'src/kept.ts',
+            symbols: [{
+              name: 'KeptSymbol',
+              kind: vscode.SymbolKind.Function,
+              uri: keptFile.toString(),
+              startLine: 0,
+              startColumn: 0,
+              approximate: false
+            }]
+          },
+          {
+            relativePath: 'src/emptySymbols.ts',
+            symbols: [{
+              name: 'OldEmptySymbol',
+              kind: vscode.SymbolKind.Function,
+              uri: emptySymbolsFile.toString(),
+              startLine: 0,
+              startColumn: 0,
+              approximate: false
+            }]
+          },
+          {
+            relativePath: 'src/removed.ts',
+            symbols: [{
+              name: 'RemovedSymbol',
+              kind: vscode.SymbolKind.Function,
+              uri: vscode.Uri.file('c:\\workspace\\src\\removed.ts').toString(),
+              startLine: 0,
+              startColumn: 0,
+              approximate: false
+            }]
+          }
+        ],
+        semanticIndex: [
+          {
+            relativePath: 'src/emptySymbols.ts',
+            entries: [{
+              key: 'OldEmptySymbol:11::0:0',
+              metadata: {
+                provider: 'vscode',
+                status: 'enriched',
+                confidence: 1,
+                enrichedAt: 123
+              }
+            }]
+          },
+          {
+            relativePath: 'src/removed.ts',
+            entries: [{
+              key: 'RemovedSymbol:11::0:0',
+              metadata: {
+                provider: 'vscode',
+                status: 'enriched',
+                confidence: 1,
+                enrichedAt: 123
+              }
+            }]
+          }
+        ]
+      })) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async (workspaceId, snapshot) => {
+        if (workspaceId === expectedWorkspaceId) {
+          persistedWrites.push({ workspaceId, snapshot });
+        }
+      }) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+
+    try {
+      activate({
+        subscriptions: []
+      } as unknown as vscode.ExtensionContext);
+      await waitFor(
+        () => latestPersistedSnapshot(persistedWrites, (snapshot) => isCompletedLayerSnapshot(snapshot, 'symbol')) !== undefined,
+        'completed reconciled snapshot'
+      );
+
+      const reconciledSnapshot = latestPersistedSnapshot(
+        persistedWrites,
+        (snapshot) => isCompletedLayerSnapshot(snapshot, 'symbol')
+      )?.snapshot;
+      assert.ok(reconciledSnapshot, 'expected a completed reconciled snapshot');
+      assert.deepEqual(reconciledSnapshot.fileIndex.map((entry) => entry.relativePath).sort(), [
+        'src/emptySymbols.ts',
+        'src/kept.ts',
+        'src/oversized.ts'
+      ]);
+      assert.deepEqual(reconciledSnapshot.textIndex.map((entry) => entry.relativePath).sort(), [
+        'src/emptySymbols.ts',
+        'src/kept.ts'
+      ]);
+      assert.deepEqual(
+        reconciledSnapshot.symbolIndex
+          .filter((entry) => entry.symbols.length > 0)
+          .map((entry) => entry.relativePath)
+          .sort(),
+        ['src/kept.ts', 'src/oversized.ts']
+      );
+      assert.deepEqual(reconciledSnapshot.semanticIndex?.map((entry) => entry.relativePath), []);
+    } finally {
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(executeCommandPatch);
+      restoreProperty(fsPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(configPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+    }
+  });
+
+  test('persists the file layer in planner order during startup', async () => {
+    const workspaceUri = vscode.Uri.file('c:\\workspace');
+    const betaFile = vscode.Uri.file('c:\\workspace\\src\\beta.ts');
+    const alphaFile = vscode.Uri.file('c:\\workspace\\src\\alpha.ts');
+    const expectedWorkspaceId = toExpectedWorkspaceId([workspaceUri]);
+    const persistedWrites: RecordedPersistedSnapshot[] = [];
+    const originalWorkspaceFs = vscode.workspace.fs;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((() => new vscode.Disposable(() => undefined)) as unknown) as typeof vscode.commands.registerCommand);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true,
+            semanticEnrichment: false
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => [
+      betaFile,
+      alphaFile
+    ]) as typeof vscode.workspace.findFiles);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      if (typeof pathOrUri === 'string') {
+        return pathOrUri;
+      }
+
+      return `src/${path.basename(pathOrUri.fsPath)}`;
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', (() => ({
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    })) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const fsPatch = patchProperty(vscode.workspace, 'fs', {
+      ...originalWorkspaceFs,
+      stat: async () => ({
+        type: vscode.FileType.File,
+        ctime: 0,
+        mtime: 0,
+        size: 32
+      }),
+      readFile: async (uri: vscode.Uri) => Uint8Array.from(Buffer.from(`export const ${path.basename(uri.fsPath, '.ts')} = true;`))
+    } as typeof vscode.workspace.fs);
+    const executeCommandPatch = patchProperty(vscode.commands, 'executeCommand', (async (command: string, uri?: vscode.Uri) => {
+      if (command !== 'vscode.executeDocumentSymbolProvider') {
+        return undefined;
+      }
+
+      return [new vscode.DocumentSymbol(
+        path.basename(uri?.fsPath ?? 'alpha.ts', '.ts'),
+        '',
+        vscode.SymbolKind.Function,
+        new vscode.Range(0, 0, 0, 10),
+        new vscode.Range(0, 0, 0, 10)
+      )];
+    }) as typeof vscode.commands.executeCommand);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async (workspaceId, snapshot) => {
+        if (workspaceId === expectedWorkspaceId) {
+          persistedWrites.push({ workspaceId, snapshot });
+        }
+      }) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+
+    try {
+      activate({
+        subscriptions: []
+      } as unknown as vscode.ExtensionContext);
+      await waitFor(
+        () => latestPersistedSnapshot(
+          persistedWrites,
+          (snapshot) => hasPersistedLayer(snapshot, 'file') && snapshot.metadata.layerState?.activeLayer === 'text'
+        ) !== undefined,
+        'file-layer checkpoint'
+      );
+
+      const fileLayerSnapshot = latestPersistedSnapshot(
+        persistedWrites,
+        (snapshot) => hasPersistedLayer(snapshot, 'file') && snapshot.metadata.layerState?.activeLayer === 'text'
+      )?.snapshot;
+      assert.ok(fileLayerSnapshot, 'expected a file-layer checkpoint');
+      assert.deepEqual(fileLayerSnapshot.fileIndex.map((entry) => entry.relativePath), [
+        'src/alpha.ts',
+        'src/beta.ts'
+      ]);
+      await waitFor(
+        () => latestPersistedSnapshot(persistedWrites, (snapshot) => isCompletedLayerSnapshot(snapshot, 'symbol')) !== undefined,
+        'completed startup build'
+      );
+    } finally {
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(executeCommandPatch);
+      restoreProperty(fsPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(configPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+    }
+  });
+
   test('builds the workspace file index once during activation and reuses it', async () => {
     const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
     const findFilesCalls: Array<{ include: vscode.GlobPattern; exclude?: vscode.GlobPattern | null; }> = [];

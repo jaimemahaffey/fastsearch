@@ -136,6 +136,28 @@ suite('semantic enrichment index', () => {
     assert.equal(stored.declaration?.column, 0, 'stored declaration should not be affected by input mutation');
   });
 
+  test('delete removes semantic metadata for a single file', () => {
+    const index = new SemanticIndex();
+
+    index.set('src/alpha.ts', 'Alpha:5:7:class', {
+      provider: 'vscode',
+      status: 'enriched',
+      confidence: 1,
+      enrichedAt: 123
+    });
+    index.set('src/beta.ts', 'Beta:5::2:1', {
+      provider: 'vscode',
+      status: 'failed',
+      confidence: 0,
+      enrichedAt: 456
+    });
+
+    index.delete('src/alpha.ts');
+
+    assert.equal(index.get('src/alpha.ts', 'Alpha:5:7:class'), undefined);
+    assert.equal(index.get('src/beta.ts', 'Beta:5::2:1')?.status, 'failed');
+  });
+
   test('creates stable semantic keys from symbol identity fields', () => {
     const symbol = {
       name: 'Alpha',
