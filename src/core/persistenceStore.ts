@@ -14,15 +14,36 @@ export type PersistedTextEntry = {
   relativePath: string;
   uri: string;
   content: string;
+  contentHash?: string | null;
 };
 
 export type PersistedSymbolEntry = {
   relativePath: string;
+  contentHash?: string | null;
   symbols: SymbolRecord[];
+};
+
+export type PersistedMerkleLeaf = {
+  relativePath: string;
+  uri: string;
+  contentHash: string;
+  size: number;
+};
+
+export type PersistedMerkleSubtreeHash = {
+  path: string;
+  hash: string;
+};
+
+export type PersistedMerkleTree = {
+  rootHash: string;
+  subtreeHashes: PersistedMerkleSubtreeHash[];
+  leaves: PersistedMerkleLeaf[];
 };
 
 export type PersistedWorkspaceSnapshot = {
   metadata: PersistedSnapshotMetadata;
+  merkle?: PersistedMerkleTree;
   fileIndex: FileRecord[];
   textIndex: PersistedTextEntry[];
   symbolIndex: PersistedSymbolEntry[];

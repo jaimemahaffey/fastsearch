@@ -59,6 +59,10 @@ export class SemanticIndex {
     this.byFile.clear();
   }
 
+  removeForFile(relativePath: string): void {
+    this.byFile.delete(relativePath);
+  }
+
   get(relativePath: string, key: string): SemanticMetadata | undefined {
     const metadata = this.byFile.get(relativePath)?.get(key);
     return metadata ? cloneSemanticMetadata(metadata) : undefined;

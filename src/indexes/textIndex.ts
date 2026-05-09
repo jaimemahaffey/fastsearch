@@ -12,13 +12,14 @@ export type TextMatch = {
 const MAX_TEXT_SEARCH_RESULTS = 200;
 
 export class TextIndex {
-  private readonly contents = new Map<string, { uri: string; content: string }>();
+  private readonly contents = new Map<string, { uri: string; content: string; contentHash?: string | null }>();
 
-  allContents(): Array<{ relativePath: string; uri: string; content: string; }> {
+  allContents(): Array<{ relativePath: string; uri: string; content: string; contentHash?: string | null; }> {
     return [...this.contents.entries()].map(([relativePath, entry]) => ({
       relativePath,
       uri: entry.uri,
-      content: entry.content
+      content: entry.content,
+      contentHash: entry.contentHash
     }));
   }
 
@@ -30,8 +31,12 @@ export class TextIndex {
     this.contents.clear();
   }
 
-  upsert(relativePath: string, uri: string, content: string): void {
-    this.contents.set(relativePath, { uri, content });
+  upsert(relativePath: string, uri: string, content: string, contentHash?: string | null): void {
+    this.contents.set(relativePath, { uri, content, contentHash });
+  }
+
+  removeForFile(relativePath: string): void {
+    this.contents.delete(relativePath);
   }
 
   search(query: string): TextMatch[] {
