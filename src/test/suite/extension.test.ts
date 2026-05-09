@@ -17,6 +17,9 @@ function toPersistenceConfigHash(overrides: Record<string, unknown> = {}): strin
     sharedIgnoreFiles: [],
     ignoreInputs: [],
     maxFileSizeKb: 512,
+    semanticEnrichment: true,
+    semanticConcurrency: 2,
+    semanticTimeoutMs: 750,
     ...overrides
   });
 }
