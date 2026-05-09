@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { SymbolRecord } from '../indexes/symbolIndex';
 import type { SemanticIndexFileEntry } from '../semantics/semanticIndex';
 import type { FileRecord } from '../shared/types';
+import type { PersistedMerkleSnapshot } from './merkleSnapshot';
 
 export type PersistedSnapshotMetadata = {
   schemaVersion: number;
@@ -14,15 +15,18 @@ export type PersistedTextEntry = {
   relativePath: string;
   uri: string;
   content: string;
+  contentHash: string;
 };
 
 export type PersistedSymbolEntry = {
   relativePath: string;
+  contentHash: string;
   symbols: SymbolRecord[];
 };
 
 export type PersistedWorkspaceSnapshot = {
   metadata: PersistedSnapshotMetadata;
+  merkle: PersistedMerkleSnapshot;
   fileIndex: FileRecord[];
   textIndex: PersistedTextEntry[];
   symbolIndex: PersistedSymbolEntry[];

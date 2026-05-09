@@ -9,8 +9,11 @@ import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
+import { hashContent } from './core/contentHash';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
 import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
+import { buildMerkleTree } from './core/merkleTree';
+import { toPersistedSubtreeHashes } from './core/merkleSnapshot';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
 import { FileIndex } from './indexes/fileIndex';
@@ -733,6 +736,21 @@ function createPersistedWorkspaceSnapshot(
   textIndex: TextIndex,
   semanticIndex: SemanticIndex
 ): PersistedWorkspaceSnapshot {
+  const persistedTextEntries = textIndex.allContents().map((entry) => ({
+    relativePath: entry.relativePath,
+    uri: entry.uri,
+    content: entry.content,
+    contentHash: hashContent(entry.content)
+  }));
+  const contentHashByPath = new Map(persistedTextEntries.map((entry) => [entry.relativePath, entry.contentHash] as const));
+  const merkle = buildMerkleTree(
+    persistedTextEntries.map((entry) => ({
+      relativePath: entry.relativePath,
+      uri: entry.uri,
+      contentHash: entry.contentHash,
+      size: Buffer.byteLength(entry.content, 'utf8')
+    }))
+  );
   return {
     metadata: {
       schemaVersion: PERSISTENCE_SCHEMA_VERSION,
@@ -740,8 +758,17 @@ function createPersistedWorkspaceSnapshot(
       configHash: persistenceConfigHash
     },
     fileIndex: fileIndex.all(),
-    textIndex: textIndex.allContents(),
-    symbolIndex: symbolIndex.allByFile(),
+    merkle: {
+      rootHash: merkle.rootHash,
+      subtreeHashes: toPersistedSubtreeHashes(merkle.subtreeHashes),
+      leaves: [...merkle.leavesByPath.values()]
+    },
+    textIndex: persistedTextEntries,
+    symbolIndex: symbolIndex.allByFile().map((entry) => ({
+      relativePath: entry.relativePath,
+      contentHash: contentHashByPath.get(entry.relativePath) ?? hashContent(''),
+      symbols: entry.symbols
+    })),
     semanticIndex: semanticIndex.allByFile()
   };
 }

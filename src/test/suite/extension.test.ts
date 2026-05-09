@@ -120,8 +120,13 @@ suite('extension activation', () => {
         schemaVersion: 2,
         workspaceId: toExpectedWorkspaceId([workspaceUri]),
         configHash: DEFAULT_PERSISTENCE_CONFIG_HASH
-      },
-      fileIndex: [{
+              },
+        merkle: {
+          rootHash: '',
+          subtreeHashes: [],
+          leaves: []
+        },
+        fileIndex: [{
         relativePath: 'src/app/main.ts',
         uri: 'file:///workspace/src/app/main.ts',
         basename: 'main.ts',
@@ -251,8 +256,13 @@ suite('extension activation', () => {
         schemaVersion: 2,
         workspaceId: toExpectedWorkspaceId([workspaceUri]),
         configHash: semanticConfigHash
-      },
-      fileIndex: [{
+              },
+        merkle: {
+          rootHash: '',
+          subtreeHashes: [],
+          leaves: []
+        },
+        fileIndex: [{
         relativePath: 'src/app/main.ts',
         uri: 'file:///workspace/src/app/main.ts',
         basename: 'main.ts',
@@ -262,6 +272,7 @@ suite('extension activation', () => {
       textIndex: [],
       symbolIndex: [{
         relativePath: 'src/app/main.ts',
+        contentHash: 'main-hash',
         symbols: [{
           name: 'MainService',
           kind: 5,
@@ -409,8 +420,13 @@ suite('extension activation', () => {
         schemaVersion: 0,
         workspaceId: toExpectedWorkspaceId([workspaceUri]),
         configHash: DEFAULT_PERSISTENCE_CONFIG_HASH
-      },
-      fileIndex: [{
+              },
+        merkle: {
+          rootHash: '',
+          subtreeHashes: [],
+          leaves: []
+        },
+        fileIndex: [{
         relativePath: 'src/app/main.ts',
         uri: 'file:///workspace/src/app/main.ts',
         basename: 'main.ts',
@@ -561,8 +577,13 @@ suite('extension activation', () => {
         schemaVersion: 1,
         workspaceId: toExpectedWorkspaceId([workspaceUri]),
         configHash: 'stale-config'
-      },
-      fileIndex: [{
+              },
+        merkle: {
+          rootHash: '',
+          subtreeHashes: [],
+          leaves: []
+        },
+        fileIndex: [{
         relativePath: 'src/app/main.ts',
         uri: 'file:///workspace/src/app/main.ts',
         basename: 'main.ts',
@@ -728,8 +749,13 @@ suite('extension activation', () => {
             rules: ['generated/', '!generated/keep.ts']
           }]
         })
-      },
-      fileIndex: [{
+              },
+        merkle: {
+          rootHash: '',
+          subtreeHashes: [],
+          leaves: []
+        },
+        fileIndex: [{
         relativePath: 'src/app/main.ts',
         uri: vscode.Uri.file(indexedFilePath).toString(),
         basename: 'main.ts',
@@ -890,8 +916,13 @@ suite('extension activation', () => {
         schemaVersion: 2,
         workspaceId: expectedWorkspaceId,
         configHash: DEFAULT_PERSISTENCE_CONFIG_HASH
-      },
-      fileIndex: [{
+              },
+        merkle: {
+          rootHash: '',
+          subtreeHashes: [],
+          leaves: []
+        },
+        fileIndex: [{
         relativePath: 'workspace-a/src/app/main.ts',
         uri: vscode.Uri.file('c:\\workspace-a\\src\\app\\main.ts').toString(),
         basename: 'main.ts',
