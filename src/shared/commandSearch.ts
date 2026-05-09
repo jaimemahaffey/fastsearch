@@ -53,12 +53,17 @@ let activeCommandSearchQuickPick: {
   suppressHideHandler: boolean;
 } | undefined;
 
+export function getCommandSearchDisplayPath(uri: string): string {
+  const parsed = vscode.Uri.parse(uri);
+  return parsed.scheme === 'file' ? parsed.fsPath : uri;
+}
+
 export function toFileSearchCandidate(record: FileRecord): CommandSearchCandidate {
   return {
     source: 'file',
     label: record.basename,
     description: record.relativePath,
-    detail: record.uri,
+    detail: getCommandSearchDisplayPath(record.uri),
     filterText: `${record.basename} ${record.relativePath}`,
     uri: record.uri,
     approximate: false
@@ -70,7 +75,7 @@ export function toTextSearchCandidate(match: TextMatch): CommandSearchCandidate 
     source: 'text',
     label: `${match.relativePath}:${match.line}`,
     description: match.preview,
-    detail: match.uri,
+    detail: getCommandSearchDisplayPath(match.uri),
     filterText: `${match.relativePath} ${match.preview}`,
     uri: match.uri,
     line: match.line - 1,
@@ -79,12 +84,13 @@ export function toTextSearchCandidate(match: TextMatch): CommandSearchCandidate 
   };
 }
 
-export function getSemanticSymbolDetail(uri: string, semanticMetadata?: SemanticMetadata): string {
+export function getSemanticSymbolDetail(rawUri: string, semanticMetadata?: SemanticMetadata): string {
+  const displayPath = getCommandSearchDisplayPath(rawUri);
   if (!semanticMetadata || semanticMetadata.status !== 'enriched') {
-    return uri;
+    return displayPath;
   }
 
-  const parts: string[] = [uri];
+  const parts: string[] = [displayPath];
 
   if (semanticMetadata.referenceCount !== undefined) {
     parts.push(`${semanticMetadata.referenceCount} refs`);
@@ -124,22 +130,12 @@ export function toDiscoverySearchCandidate(
   source: 'usage' | 'implementation',
   result: DiscoveryResult
 ): CommandSearchCandidate {
-  // For file-backed URIs, normalize detail to display path, but keep label/filterText as raw URI
-  let detail = result.uri;
-  try {
-    if (result.uri.startsWith('file:///')) {
-      // Remove file:/// and any workspace prefix for display
-      const match = result.uri.match(/^file:\/\/(?:[^\/]+)?\/?(.*)$/);
-      if (match && match[1]) {
-        detail = decodeURIComponent(match[1]);
-      }
-    }
-  } catch {}
+  const displayPath = getCommandSearchDisplayPath(result.uri);
   return {
     source,
     label: `${result.uri}:${result.line + 1}`,
     description: undefined,
-    detail,
+    detail: displayPath,
     filterText: result.uri,
     uri: result.uri,
     line: result.line,

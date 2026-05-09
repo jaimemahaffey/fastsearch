@@ -37,11 +37,13 @@ suite('commandSearch', () => {
       approximate: true
     };
 
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse(fileRecord.uri).fsPath;
     assert.deepEqual(toFileSearchCandidate(fileRecord), {
       source: 'file',
       label: 'main.ts',
       description: 'src/app/main.ts',
-      detail: fileRecord.uri,
+      detail: displayPath,
       filterText: 'main.ts src/app/main.ts',
       uri: fileRecord.uri,
       approximate: false
@@ -50,7 +52,7 @@ suite('commandSearch', () => {
       source: 'text',
       label: 'src/app/main.ts:7',
       description: 'const alpha = beta;',
-      detail: fileRecord.uri,
+      detail: displayPath,
       filterText: 'src/app/main.ts const alpha = beta;',
       uri: fileRecord.uri,
       line: 6,
@@ -61,7 +63,7 @@ suite('commandSearch', () => {
       source: 'symbol',
       label: 'AlphaService',
       description: 'services',
-      detail: fileRecord.uri,
+      detail: displayPath,
       filterText: 'AlphaService services',
       uri: fileRecord.uri,
       line: 10,
@@ -70,10 +72,10 @@ suite('commandSearch', () => {
     });
     assert.deepEqual(toDiscoverySearchCandidate('usage', discoveryResult), {
       source: 'usage',
-      label: 'file:///workspace/src/app/main.ts:15', // discovery label stays raw URI
+      label: `${fileRecord.uri}:15`,
       description: undefined,
-      detail: 'workspace/src/app/main.ts', // display path normalization for detail
-      filterText: 'file:///workspace/src/app/main.ts', // filterText stays raw URI
+      detail: displayPath,
+      filterText: fileRecord.uri,
       uri: fileRecord.uri,
       line: 14,
       approximate: true
@@ -98,6 +100,7 @@ suite('commandSearch', () => {
   });
 
   test('collects results from available providers only', async () => {
+    const vscode = require('vscode');
     const calls: string[] = [];
     const providers: Array<CommandSearchProvider<{ query: string }>> = [
       {
@@ -108,7 +111,7 @@ suite('commandSearch', () => {
           return [{
             source: 'file',
             label: 'main.ts',
-            detail: 'file:///workspace/src/app/main.ts',
+            detail: vscode.Uri.parse('file:///workspace/src/app/main.ts').fsPath,
             filterText: 'main.ts',
             uri: 'file:///workspace/src/app/main.ts',
             approximate: false
@@ -133,11 +136,12 @@ suite('commandSearch', () => {
   });
 
   test('supports non-contiguous fuzzy matches when ranking command candidates', () => {
+    const vscode = require('vscode');
     const results = rankCommandSearchCandidates('gtf', [
       {
         source: 'file',
         label: 'Go To Text',
-        detail: 'file:///workspace/src/text.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/text.ts').fsPath,
         filterText: 'go to text src/text.ts',
         uri: 'file:///workspace/src/text.ts',
         approximate: false
@@ -145,7 +149,7 @@ suite('commandSearch', () => {
       {
         source: 'file',
         label: 'Go To File',
-        detail: 'file:///workspace/src/file.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/file.ts').fsPath,
         filterText: 'go to file src/file.ts',
         uri: 'file:///workspace/src/file.ts',
         approximate: false
@@ -156,11 +160,12 @@ suite('commandSearch', () => {
   });
 
   test('orders exact, prefix, and substring matches by strength', () => {
+    const vscode = require('vscode');
     const results = rankCommandSearchCandidates('file', [
       {
         source: 'file',
         label: 'Go To File',
-        detail: 'file:///workspace/src/go-to-file.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/go-to-file.ts').fsPath,
         filterText: 'go to file',
         uri: 'file:///workspace/src/go-to-file.ts',
         approximate: false
@@ -168,7 +173,7 @@ suite('commandSearch', () => {
       {
         source: 'file',
         label: 'File Search',
-        detail: 'file:///workspace/src/file-search.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/file-search.ts').fsPath,
         filterText: 'file search',
         uri: 'file:///workspace/src/file-search.ts',
         approximate: false
@@ -176,7 +181,7 @@ suite('commandSearch', () => {
       {
         source: 'file',
         label: 'file',
-        detail: 'file:///workspace/src/file.ts',
+        detail: vscode.Uri.parse('file:///workspace/src/file.ts').fsPath,
         filterText: 'file',
         uri: 'file:///workspace/src/file.ts',
         approximate: false
@@ -201,12 +206,14 @@ suite('commandSearch', () => {
       enrichedAt: 123
     };
 
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse('file:///workspace/src/app/main.ts').fsPath;
     const detail = getSemanticSymbolDetail('file:///workspace/src/app/main.ts', semanticMetadata);
 
-    assert.equal(detail, 'file:///workspace/src/app/main.ts • 7 refs • 3 impls • vscode');
+    assert.equal(detail, `${displayPath} • 7 refs • 3 impls • vscode`);
   });
 
-  test('enriches symbol search candidates with semantic metadata', () => {
+  test('enriches symbol search candidates with semantic metadata and uses cleaned display path', () => {
     const symbolRecord: SymbolRecord = {
       name: 'AlphaService',
       kind: 5,
@@ -228,10 +235,13 @@ suite('commandSearch', () => {
 
     const candidate = toSymbolSearchCandidate(symbolRecord, semanticMetadata);
 
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse(symbolRecord.uri).fsPath;
+
     assert.equal(candidate.source, 'symbol');
     assert.equal(candidate.label, 'AlphaService');
     assert.equal(candidate.description, 'services');
-    assert.equal(candidate.detail, 'file:///workspace/src/app/main.ts • 7 refs • 3 impls • vscode');
+    assert.equal(candidate.detail, `${displayPath} • 7 refs • 3 impls • vscode`);
     assert.equal(candidate.filterText, 'AlphaService services');
     assert.equal(candidate.uri, 'file:///workspace/src/app/main.ts');
     assert.equal(candidate.line, 10);
@@ -240,7 +250,7 @@ suite('commandSearch', () => {
     assert.equal(candidate.semanticConfidence, 1);
   });
 
-  test('preserves semanticConfidence from non-enriched metadata while falling back detail to raw URI', () => {
+  test('non-enriched semantic metadata keeps semanticConfidence and uses cleaned display path', () => {
     const symbolRecord: SymbolRecord = {
       name: 'BetaService',
       kind: 5,
@@ -260,11 +270,18 @@ suite('commandSearch', () => {
       enrichedAt: 456
     };
 
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse(symbolRecord.uri).fsPath;
     const candidate = toSymbolSearchCandidate(symbolRecord, semanticMetadata);
 
-    // Detail should fall back to raw URI when status is not 'enriched'
-    assert.equal(candidate.detail, 'file:///workspace/src/app/service.ts');
-    // But semanticConfidence should still be copied from metadata
+    assert.equal(candidate.detail, displayPath);
     assert.equal(candidate.semanticConfidence, 0.8);
   });
+
+  test('getCommandSearchDisplayPath leaves non-file URIs unchanged', () => {
+    const nonFileUri = 'git:/workspace/src/app/main.ts';
+    const { getCommandSearchDisplayPath } = require('../../shared/commandSearch');
+    assert.equal(getCommandSearchDisplayPath(nonFileUri), nonFileUri);
+  });
+
 });
