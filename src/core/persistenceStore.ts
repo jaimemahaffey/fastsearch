@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SymbolRecord } from '../indexes/symbolIndex';
+import type { SemanticIndexFileEntry } from '../semantics/semanticIndex';
 import type { FileRecord } from '../shared/types';
 
 export type PersistedSnapshotMetadata = {
@@ -25,6 +26,7 @@ export type PersistedWorkspaceSnapshot = {
   fileIndex: FileRecord[];
   textIndex: PersistedTextEntry[];
   symbolIndex: PersistedSymbolEntry[];
+  semanticIndex?: SemanticIndexFileEntry[];
 };
 
 export class PersistenceStore {

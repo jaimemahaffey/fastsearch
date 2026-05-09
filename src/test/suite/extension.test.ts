@@ -75,7 +75,7 @@ suite('extension activation', () => {
     const workspaceUri = vscode.Uri.file('c:\\workspace');
     const persistedSnapshot = {
       metadata: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         workspaceId: toExpectedWorkspaceId([workspaceUri]),
         configHash: DEFAULT_PERSISTENCE_CONFIG_HASH
       },
@@ -189,6 +189,169 @@ suite('extension activation', () => {
       restoreProperty(relativePatch);
       restoreProperty(configPatch);
       restoreProperty(findFilesPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+    }
+  });
+
+  test('restores persisted semantic metadata with indexed symbols and shows semantic detail in goToSymbol', async () => {
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    const quickPickItems: vscode.QuickPickItem[] = [];
+    const workspaceUri = vscode.Uri.file('c:\\workspace');
+    const indexedFile = vscode.Uri.parse('file:///workspace/src/app/main.ts');
+    const semanticConfigHash = toPersistenceConfigHash({
+      semanticEnrichment: true,
+      semanticConcurrency: 5,
+      semanticTimeoutMs: 5000
+    });
+    const persistedSnapshot = {
+      metadata: {
+        schemaVersion: 2,
+        workspaceId: toExpectedWorkspaceId([workspaceUri]),
+        configHash: semanticConfigHash
+      },
+      fileIndex: [{
+        relativePath: 'src/app/main.ts',
+        uri: 'file:///workspace/src/app/main.ts',
+        basename: 'main.ts',
+        extension: '.ts',
+        tokens: ['src', 'app', 'main', 'ts']
+      }],
+      textIndex: [],
+      symbolIndex: [{
+        relativePath: 'src/app/main.ts',
+        symbols: [{
+          name: 'MainService',
+          kind: 5,
+          containerName: undefined,
+          startLine: 0,
+          startColumn: 0,
+          endLine: 0,
+          endColumn: 12,
+          uri: 'file:///workspace/src/app/main.ts',
+          approximate: false
+        }]
+      }],
+      semanticIndex: [{
+        relativePath: 'src/app/main.ts',
+        entries: [{
+          key: 'MainService:5::0:0',
+          metadata: {
+            referenceCount: 6,
+            implementationCount: 2,
+            provider: 'vscode',
+            status: 'enriched',
+            confidence: 1,
+            enrichedAt: 123
+          }
+        }]
+      }]
+    };
+    let resolveFindFiles: ((value: vscode.Uri[]) => void) | undefined;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => {
+        registeredCommands.delete(command);
+      });
+    }) as typeof vscode.commands.registerCommand);
+    const executeCommandPatch = patchProperty(vscode.commands, 'executeCommand', (async () => []) as typeof vscode.commands.executeCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (((_include: vscode.GlobPattern, _exclude?: vscode.GlobPattern | null) =>
+      new Promise<vscode.Uri[]>((resolve) => {
+        resolveFindFiles = resolve;
+      })) as unknown) as typeof vscode.workspace.findFiles);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true,
+            completionStyleResults: false,
+            semanticEnrichment: true,
+            semanticConcurrency: 5,
+            semanticTimeoutMs: 5000
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      return typeof pathOrUri === 'string' ? pathOrUri : 'src/app/main.ts';
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', ((uri: vscode.Uri) => ({
+      uri: workspaceUri,
+      index: 0,
+      name: uri.path.includes('workspace') ? 'workspace' : 'other'
+    })) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const inputPatch = patchProperty(vscode.window, 'showInputBox', (async () => 'main') as typeof vscode.window.showInputBox);
+    const quickPickPatch = patchProperty(vscode.window, 'showQuickPick', ((async (items: readonly vscode.QuickPickItem[]) => {
+      quickPickItems.push(...items);
+      return undefined;
+    }) as unknown) as typeof vscode.window.showQuickPick);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => persistedSnapshot) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+
+    const goToSymbolCommandPromise = (async () => {
+      activate({
+        subscriptions: []
+      } as unknown as vscode.ExtensionContext);
+
+      const goToSymbolCommand = registeredCommands.get('fastIndexer.goToSymbol');
+      assert.ok(goToSymbolCommand, 'goToSymbol command should be registered');
+      await Promise.resolve(goToSymbolCommand?.());
+    })();
+
+    try {
+      const outcome = await Promise.race([
+        goToSymbolCommandPromise.then(() => 'resolved'),
+        new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 50))
+      ]);
+
+      assert.equal(outcome, 'resolved');
+      assert.equal(quickPickItems.length, 1);
+      assert.equal(quickPickItems[0]?.label, 'MainService');
+      assert.equal(quickPickItems[0]?.detail, `${indexedFile.toString()} • 6 refs • 2 impls • vscode`);
+    } finally {
+      resolveFindFiles?.([]);
+      await goToSymbolCommandPromise;
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(quickPickPatch);
+      restoreProperty(inputPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(configPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(executeCommandPatch);
       restoreProperty(registerPatch);
       restoreProperty(outputPatch);
     }
@@ -513,7 +676,7 @@ suite('extension activation', () => {
     let persistedWrites = 0;
     const persistedSnapshot = {
       metadata: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         workspaceId: toExpectedWorkspaceId([workspaceUri]),
         configHash: toPersistenceConfigHash({
           ignoreFiles: ['.fast-indexer-ignore'],
@@ -682,7 +845,7 @@ suite('extension activation', () => {
     const expectedWorkspaceId = toExpectedWorkspaceId([firstWorkspaceUri, secondWorkspaceUri]);
     const persistedSnapshot = {
       metadata: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         workspaceId: expectedWorkspaceId,
         configHash: DEFAULT_PERSISTENCE_CONFIG_HASH
       },

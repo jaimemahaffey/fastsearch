@@ -16,6 +16,7 @@ import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, ty
 import { FileIndex } from './indexes/fileIndex';
 import { SymbolIndex } from './indexes/symbolIndex';
 import { TextIndex } from './indexes/textIndex';
+import { SemanticIndex } from './semantics/semanticIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 import type { FastIndexerConfig } from './configuration';
 import type { WorkspacePersistence } from './shared/types';
@@ -24,7 +25,7 @@ const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
 const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
-const PERSISTENCE_SCHEMA_VERSION = 1;
+const PERSISTENCE_SCHEMA_VERSION = 2;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Fast Symbol Indexer');
@@ -33,6 +34,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const fileIndex = new FileIndex();
   const symbolIndex = new SymbolIndex();
   const textIndex = new TextIndex();
+  const semanticIndex = new SemanticIndex();
   const persistenceStore = new PersistenceStore(context.globalStorageUri?.fsPath ?? context.storageUri?.fsPath ?? '.fast-indexer-cache');
   const workspacePersistence = getWorkspacePersistence();
   let activeIgnoreMatcher: IgnoreMatcher = createIgnoreMatcher({
@@ -74,7 +76,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (completed !== false && getConfig().enabled) {
       await persistenceStore.writeWorkspaceSnapshot(
         workspacePersistence.workspaceId,
-        createPersistedWorkspaceSnapshot(workspacePersistence, activePersistenceConfigHash, fileIndex, symbolIndex, textIndex)
+        createPersistedWorkspaceSnapshot(workspacePersistence, activePersistenceConfigHash, fileIndex, symbolIndex, textIndex, semanticIndex)
       );
     }
 
@@ -85,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
       fileIndex.clear();
       symbolIndex.clear();
       textIndex.clear();
+      semanticIndex.clear();
     },
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
     buildWorkspace
@@ -203,7 +206,8 @@ export function activate(context: vscode.ExtensionContext): void {
       () => activePersistenceConfigHash,
       fileIndex,
       symbolIndex,
-      textIndex
+      textIndex,
+      semanticIndex
     )
       .then((restored) => {
         restoredSnapshotReady = restored;
@@ -265,7 +269,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const cycleLog = (message: string): void => {
     output.appendLine(`[cycle] ${message}`);
   };
-  const cycleSearchMode = createCycleSearchModeCommand(fileIndex, textIndex, symbolIndex, getConfig, cycleLog);
+  const cycleSearchMode = createCycleSearchModeCommand(fileIndex, textIndex, symbolIndex, getConfig, cycleLog, semanticIndex);
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.cycleSearchMode', async () => {
     cycleLog('command invoked');
@@ -348,7 +352,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await goToSymbol(symbolIndex, getConfig());
+    await goToSymbol(symbolIndex, getConfig(), {}, {}, semanticIndex);
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.rebuildIndex', async () => {
@@ -579,7 +583,8 @@ async function restorePersistedSnapshot(
   getPersistenceConfigHash: () => string,
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
-  textIndex: TextIndex
+  textIndex: TextIndex,
+  semanticIndex: SemanticIndex
 ): Promise<boolean> {
   try {
     await refreshIgnoreMatcher();
@@ -593,7 +598,7 @@ async function restorePersistedSnapshot(
       return false;
     }
 
-    hydrateIndexesFromSnapshot(snapshot, fileIndex, symbolIndex, textIndex);
+    hydrateIndexesFromSnapshot(snapshot, fileIndex, symbolIndex, textIndex, semanticIndex);
     return true;
   } catch (error) {
     await persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId);
@@ -609,11 +614,13 @@ function hydrateIndexesFromSnapshot(
   snapshot: PersistedWorkspaceSnapshot,
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
-  textIndex: TextIndex
+  textIndex: TextIndex,
+  semanticIndex: SemanticIndex
 ): void {
   fileIndex.clear();
   symbolIndex.clear();
   textIndex.clear();
+  semanticIndex.clear();
 
   snapshot.fileIndex.forEach((entry) => {
     fileIndex.upsert(entry.relativePath, entry.uri, toIndexedSnapshotKey(entry));
@@ -624,6 +631,9 @@ function hydrateIndexesFromSnapshot(
   snapshot.symbolIndex.forEach((entry) => {
     symbolIndex.replaceForFile(entry.relativePath, entry.symbols);
   });
+  snapshot.semanticIndex?.forEach((entry) => {
+    semanticIndex.replaceForFile(entry.relativePath, entry.entries);
+  });
 }
 
 function createPersistedWorkspaceSnapshot(
@@ -631,7 +641,8 @@ function createPersistedWorkspaceSnapshot(
   persistenceConfigHash: string,
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
-  textIndex: TextIndex
+  textIndex: TextIndex,
+  semanticIndex: SemanticIndex
 ): PersistedWorkspaceSnapshot {
   return {
     metadata: {
@@ -641,7 +652,8 @@ function createPersistedWorkspaceSnapshot(
     },
     fileIndex: fileIndex.all(),
     textIndex: textIndex.allContents(),
-    symbolIndex: symbolIndex.allByFile()
+    symbolIndex: symbolIndex.allByFile(),
+    semanticIndex: semanticIndex.allByFile()
   };
 }
 
@@ -673,7 +685,10 @@ function createPersistenceConfigHash(
     ignoreFiles: config.ignoreFiles,
     sharedIgnoreFiles: config.sharedIgnoreFiles,
     ignoreInputs,
-    maxFileSizeKb: config.maxFileSizeKb
+    maxFileSizeKb: config.maxFileSizeKb,
+    semanticEnrichment: config.semanticEnrichment,
+    semanticConcurrency: config.semanticConcurrency,
+    semanticTimeoutMs: config.semanticTimeoutMs
   });
 }
 
