@@ -47,7 +47,8 @@ suite('configuration', () => {
         useFzf: true,
         semanticEnrichment: true,
         semanticConcurrency: 2,
-        semanticTimeoutMs: 750
+        semanticTimeoutMs: 750,
+        symbolProviderTimeoutMs: 3000
       });
     } finally {
       restoreProperty(configPatch);
@@ -62,7 +63,8 @@ suite('configuration', () => {
           const values: Record<string, unknown> = {
             semanticEnrichment: false,
             semanticConcurrency: -3,
-            semanticTimeoutMs: -10
+            semanticTimeoutMs: -10,
+            symbolProviderTimeoutMs: -25
           };
 
           return (values[key] ?? defaultValue) as T;
@@ -76,6 +78,7 @@ suite('configuration', () => {
       assert.equal(config.semanticEnrichment, false);
       assert.equal(config.semanticConcurrency, 1);
       assert.equal(config.semanticTimeoutMs, 0);
+      assert.equal(config.symbolProviderTimeoutMs, 0);
     } finally {
       restoreProperty(configPatch);
     }
@@ -113,7 +116,8 @@ suite('configuration', () => {
       'fastIndexer.maxFileSizeKb',
       'fastIndexer.semanticEnrichment',
       'fastIndexer.semanticConcurrency',
-      'fastIndexer.semanticTimeoutMs'
+      'fastIndexer.semanticTimeoutMs',
+      'fastIndexer.symbolProviderTimeoutMs'
     ];
 
     for (const watchedKey of watchedKeys) {

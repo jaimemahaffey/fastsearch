@@ -52,6 +52,7 @@ suite('activation', () => {
     assert.ok(properties['fastIndexer.completionStyleResults']);
     assert.ok(properties['fastIndexer.useRipgrep']);
     assert.ok(properties['fastIndexer.useFzf']);
+    assert.ok(properties['fastIndexer.symbolProviderTimeoutMs']);
   });
 
   test('contributes the cycling command and Ctrl+T keybinding in the manifest', async () => {

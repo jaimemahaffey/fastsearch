@@ -186,6 +186,12 @@
           "default": 750,
           "minimum": 0,
           "description": "Timeout in milliseconds for each background semantic provider request. Use 0 to disable the timeout."
+        },
+        "fastIndexer.symbolProviderTimeoutMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 0,
+          "description": "Timeout in milliseconds for each document symbol provider request during index builds. Use 0 to disable the timeout."
         }
       }
     }

@@ -26,10 +26,36 @@ const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
 const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
+const INDEX_BUILD_STATUS_PRIORITY = 100;
 const PERSISTENCE_SCHEMA_VERSION = 2;
+
+type IndexBuildKind = 'initial' | 'rebuild';
+
+type IndexBuildProgress = {
+  phase: 'discovering' | 'indexing';
+  kind: IndexBuildKind;
+  processedFiles: number;
+  totalFiles?: number;
+  skippedFiles: number;
+  symbolTimeouts: number;
+  currentFile?: string;
+  startedAt: number;
+};
+
+type IndexBuildStatusReporter = {
+  start: (token: number, kind: IndexBuildKind) => void;
+  setTotalFiles: (token: number, totalFiles: number) => void;
+  advance: (
+    token: number,
+    update: Pick<IndexBuildProgress, 'processedFiles' | 'skippedFiles' | 'symbolTimeouts' | 'currentFile'>
+  ) => void;
+  finish: (token: number) => void;
+};
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Fast Symbol Indexer');
+  const buildStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, INDEX_BUILD_STATUS_PRIORITY);
+  const buildStatus = createIndexBuildStatusReporter(buildStatusItem);
   const getConfig = () => readConfig();
   const config = getConfig();
   const fileIndex = new FileIndex();
@@ -62,29 +88,39 @@ export function activate(context: vscode.ExtensionContext): void {
     return loadedIgnoreMatcher.matcher;
   };
   const buildWorkspace = async () => {
+    const progressToken = activeBuildProgressToken;
+    const buildKind = currentBuildKind;
+    buildStatus.start(progressToken, buildKind);
     const generation = ++buildGeneration;
-    const currentConfig = getConfig();
-    const ignoreMatcher = await refreshIgnoreMatcher();
-    const completed = await buildWorkspaceIndexes(
-      fileIndex,
-      symbolIndex,
-      textIndex,
-      semanticService,
-      generation,
-      currentConfig,
-      ignoreMatcher,
-      output,
-      () => getConfig().enabled && generation === buildGeneration
-    );
 
-    if (completed !== false && getConfig().enabled) {
-      await persistenceStore.writeWorkspaceSnapshot(
-        workspacePersistence.workspaceId,
-        createPersistedWorkspaceSnapshot(workspacePersistence, activePersistenceConfigHash, fileIndex, symbolIndex, textIndex, semanticIndex)
+    try {
+      const currentConfig = getConfig();
+      const ignoreMatcher = await refreshIgnoreMatcher();
+      const completed = await buildWorkspaceIndexes(
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticService,
+        generation,
+        currentConfig,
+        ignoreMatcher,
+        output,
+        () => getConfig().enabled && generation === buildGeneration,
+        buildStatus,
+        progressToken
       );
-    }
 
-    return completed;
+      if (completed !== false && getConfig().enabled) {
+        await persistenceStore.writeWorkspaceSnapshot(
+          workspacePersistence.workspaceId,
+          createPersistedWorkspaceSnapshot(workspacePersistence, activePersistenceConfigHash, fileIndex, symbolIndex, textIndex, semanticIndex)
+        );
+      }
+
+      return completed;
+    } finally {
+      buildStatus.finish(progressToken);
+    }
   };
   const coordinator = new IndexCoordinator({
     clearIndexes: () => {
@@ -107,6 +143,8 @@ export function activate(context: vscode.ExtensionContext): void {
   let initialSnapshotPromise: Promise<void> = Promise.resolve();
   let restoredSnapshotReady = false;
   let initialBuildToken = 0;
+  let activeBuildProgressToken = 0;
+  let currentBuildKind: IndexBuildKind = 'initial';
 
   const runQueuedRebuild = (): void => {
     if (initialFileIndexBuildPending || rebuildInFlight) {
@@ -167,6 +205,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const beginBuildGate = (runner: () => Promise<boolean | void>): void => {
     const buildToken = ++initialBuildToken;
+    activeBuildProgressToken = buildToken;
     initialFileIndexBuildPending = true;
     initialIndexPromise = runner()
       .then((completed) => {
@@ -202,6 +241,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const startInitialBuild = (): void => {
+    currentBuildKind = 'initial';
     coordinator.markWarming();
     restoredSnapshotReady = false;
     initialSnapshotRestorePending = true;
@@ -229,6 +269,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const startConfigRebuild = (): void => {
+    currentBuildKind = 'rebuild';
     if (rebuildTimeout) {
       clearTimeout(rebuildTimeout);
       rebuildTimeout = undefined;
@@ -497,6 +538,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    buildStatusItem,
     output,
     {
       dispose: () => {
@@ -516,7 +558,9 @@ async function buildWorkspaceIndexes(
   config: FastIndexerConfig,
   ignoreMatcher: IgnoreMatcher,
   output: vscode.OutputChannel,
-  shouldContinue: () => boolean
+  shouldContinue: () => boolean,
+  buildStatus: IndexBuildStatusReporter,
+  progressToken: number
 ): Promise<boolean> {
   try {
     if (config.include.length === 0) {
@@ -529,6 +573,9 @@ async function buildWorkspaceIndexes(
     );
 
     let processedFiles = 0;
+    let skippedFiles = 0;
+    let symbolTimeouts = 0;
+    buildStatus.setTotalFiles(progressToken, files.length);
     for (const file of files) {
       if (!shouldContinue()) {
         return false;
@@ -537,6 +584,13 @@ async function buildWorkspaceIndexes(
       const relativePath = vscode.workspace.asRelativePath(file, true);
       if (ignoreMatcher.ignores(file.fsPath, relativePath)) {
         processedFiles += 1;
+        skippedFiles += 1;
+        buildStatus.advance(progressToken, {
+          processedFiles,
+          skippedFiles,
+          symbolTimeouts,
+          currentFile: relativePath
+        });
         if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
           await yieldToEventLoop();
         }
@@ -546,13 +600,20 @@ async function buildWorkspaceIndexes(
       fileIndex.upsert(relativePath, file.toString(), toIndexedFileKey(file, relativePath));
 
       try {
-        const symbols = await getDocumentSymbols(file);
+        const symbolResult = await getDocumentSymbolsForBuild(file, config.symbolProviderTimeoutMs);
         if (!shouldContinue()) {
           return false;
         }
 
-        symbolIndex.replaceForFile(relativePath, symbols);
-        semanticService.enqueueFile(relativePath, symbols, generation);
+        if (symbolResult.timedOut) {
+          symbolTimeouts += 1;
+          output.appendLine(
+            `Timed out reading document symbols for ${relativePath} after ${config.symbolProviderTimeoutMs}ms; continuing without symbol results.`
+          );
+        } else {
+          symbolIndex.replaceForFile(relativePath, symbolResult.symbols);
+          semanticService.enqueueFile(relativePath, symbolResult.symbols, generation);
+        }
       } catch (error) {
         output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -571,6 +632,12 @@ async function buildWorkspaceIndexes(
       }
 
       processedFiles += 1;
+      buildStatus.advance(progressToken, {
+        processedFiles,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: relativePath
+      });
       if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
         await yieldToEventLoop();
       }
@@ -710,8 +777,135 @@ function createPersistenceConfigHash(
     maxFileSizeKb: config.maxFileSizeKb,
     semanticEnrichment: config.semanticEnrichment,
     semanticConcurrency: config.semanticConcurrency,
-    semanticTimeoutMs: config.semanticTimeoutMs
+    semanticTimeoutMs: config.semanticTimeoutMs,
+    symbolProviderTimeoutMs: config.symbolProviderTimeoutMs
   });
+}
+
+async function getDocumentSymbolsForBuild(
+  file: vscode.Uri,
+  timeoutMs: number
+): Promise<
+  | { timedOut: false; symbols: Awaited<ReturnType<typeof getDocumentSymbols>>; }
+  | { timedOut: true; }
+> {
+  if (timeoutMs <= 0) {
+    return {
+      timedOut: false,
+      symbols: await getDocumentSymbols(file)
+    };
+  }
+
+  return raceWithTimeout(getDocumentSymbols(file), timeoutMs);
+}
+
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number
+): Promise<
+  | { timedOut: false; symbols: T; }
+  | { timedOut: true; }
+> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      resolve({ timedOut: true });
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve({ timedOut: false, symbols: value });
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+function createIndexBuildStatusReporter(statusItem: vscode.StatusBarItem): IndexBuildStatusReporter {
+  let activeToken = 0;
+  let state: IndexBuildProgress | undefined;
+
+  const render = (): void => {
+    if (!state) {
+      return;
+    }
+
+    const action = state.kind === 'rebuild' ? 'rebuilding' : 'indexing';
+    statusItem.text = state.phase === 'discovering'
+      ? '$(sync~spin) Fast Indexer: scanning workspace...'
+      : `$(sync~spin) Fast Indexer: ${action} ${state.processedFiles}/${state.totalFiles ?? 0}`;
+    statusItem.tooltip = createIndexBuildTooltip(state);
+    statusItem.show();
+  };
+
+  return {
+    start: (token, kind) => {
+      activeToken = token;
+      state = {
+        phase: 'discovering',
+        kind,
+        processedFiles: 0,
+        skippedFiles: 0,
+        symbolTimeouts: 0,
+        startedAt: Date.now()
+      };
+      render();
+    },
+    setTotalFiles: (token, totalFiles) => {
+      if (token !== activeToken || !state) {
+        return;
+      }
+
+      state = {
+        ...state,
+        phase: 'indexing',
+        totalFiles
+      };
+      render();
+    },
+    advance: (token, update) => {
+      if (token !== activeToken || !state) {
+        return;
+      }
+
+      state = {
+        ...state,
+        phase: 'indexing',
+        ...update
+      };
+      render();
+    },
+    finish: (token) => {
+      if (token !== activeToken) {
+        return;
+      }
+
+      activeToken = 0;
+      state = undefined;
+      statusItem.hide();
+      statusItem.tooltip = undefined;
+    }
+  };
+}
+
+function createIndexBuildTooltip(state: IndexBuildProgress): string {
+  const lines = [
+    state.phase === 'discovering'
+      ? 'Scanning workspace for files to index.'
+      : `Processed ${state.processedFiles} of ${state.totalFiles ?? 0} files.`,
+    `Skipped files: ${state.skippedFiles}`,
+    `Symbol timeouts: ${state.symbolTimeouts}`,
+    `Elapsed: ${Math.max(0, Math.round((Date.now() - state.startedAt) / 1000))}s`
+  ];
+
+  if (state.currentFile) {
+    lines.unshift(`Current file: ${state.currentFile}`);
+  }
+
+  return lines.join('\n');
 }
 
 function isPersistedSnapshotValid(
