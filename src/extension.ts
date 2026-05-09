@@ -85,6 +85,8 @@ export function activate(context: vscode.ExtensionContext): void {
   let activePersistenceConfigHash = createPersistenceConfigHash(config, []);
   let configuredIgnoreFilePaths = new Set<string>();
   let buildGeneration = 0;
+  let workspaceMerkleState: MerkleTreeSnapshot | undefined;
+  let pendingUpdateJobs: UpdateJob[] = [];
   const refreshIgnoreMatcher = async (): Promise<IgnoreMatcher> => {
     const loadedIgnoreMatcher = await loadConfiguredIgnoreMatcher(
       vscode.workspace.fs,
@@ -125,6 +127,7 @@ export function activate(context: vscode.ExtensionContext): void {
         buildKind === 'initial' ? restoredSnapshot : undefined
       );
 
+      workspaceMerkleState = completed.completed ? completed.merkle : undefined;
       if (completed.completed && getConfig().enabled && completed.canPersistSnapshot && completed.merkle) {
         await persistenceStore.writeWorkspaceSnapshot(
           workspacePersistence.workspaceId,
@@ -153,6 +156,8 @@ export function activate(context: vscode.ExtensionContext): void {
       symbolIndex.clear();
       textIndex.clear();
       semanticIndex.clear();
+      workspaceMerkleState = undefined;
+      pendingUpdateJobs = [];
     },
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
     buildWorkspace
@@ -178,6 +183,7 @@ export function activate(context: vscode.ExtensionContext): void {
     rebuildQueued = false;
     rebuildTimeout = setTimeout(() => {
       rebuildTimeout = undefined;
+      pendingUpdateJobs = [];
       rebuildInFlight = true;
       void coordinator.rebuild()
         .catch((error) => {
@@ -187,6 +193,11 @@ export function activate(context: vscode.ExtensionContext): void {
           rebuildInFlight = false;
           if (rebuildQueued) {
             runQueuedRebuild();
+            return;
+          }
+
+          if (pendingUpdateJobs.length > 0) {
+            runQueuedIncrementalUpdate();
           }
         });
     }, getConfig().debounceMs);
@@ -197,6 +208,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
+    pendingUpdateJobs = [];
     rebuildQueued = true;
     coordinator.markStale();
 
@@ -206,6 +218,147 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     runQueuedRebuild();
+  };
+
+  const applyIncrementalMerkleUpdates = async (
+    jobs: UpdateJob[],
+    generation: number,
+    config: FastIndexerConfig,
+    incrementalSemanticService: SemanticEnrichmentService
+  ): Promise<boolean> => {
+    if (!workspaceMerkleState) {
+      return false;
+    }
+
+    const shouldContinue = () => getConfig().enabled && generation === buildGeneration;
+    const merkleLeaves = new Map<string, WorkspaceMerkleEntry>(
+      [...workspaceMerkleState.leavesByPath.entries()].map(([relativePath, leaf]) => [relativePath, { ...leaf }])
+    );
+
+    for (const job of jobs) {
+      const relativePath = normalizeWorkspaceMerklePath(job.relativePath);
+      if (job.type === 'delete') {
+        removeWorkspaceFileEntries(relativePath, fileIndex, symbolIndex, textIndex, semanticIndex);
+        merkleLeaves.delete(relativePath);
+        continue;
+      }
+
+      if (!job.filePath) {
+        throw new Error(`Missing file path for ${job.type} update on ${relativePath}`);
+      }
+
+      const file = vscode.Uri.file(job.filePath);
+      let merkleEntry: WorkspaceMerkleEntry;
+      try {
+        merkleEntry = await readWorkspaceMerkleEntry(file, relativePath, config);
+      } catch (error) {
+        if (isMissingFileError(error)) {
+          removeWorkspaceFileEntries(relativePath, fileIndex, symbolIndex, textIndex, semanticIndex);
+          merkleLeaves.delete(relativePath);
+          continue;
+        }
+
+        throw error;
+      }
+      const result = await reindexWorkspaceFile(
+        file,
+        relativePath,
+        config,
+        generation,
+        output,
+        shouldContinue,
+        incrementalSemanticService,
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticIndex,
+        merkleEntry.textContent
+      );
+
+      if (result.aborted) {
+        return false;
+      }
+
+      merkleLeaves.set(relativePath, merkleEntry);
+    }
+
+    if (!shouldContinue()) {
+      return false;
+    }
+
+    workspaceMerkleState = buildMerkleTree([...merkleLeaves.values()]);
+    await persistenceStore.writeWorkspaceSnapshot(
+      workspacePersistence.workspaceId,
+      createPersistedWorkspaceSnapshot(
+        workspacePersistence,
+        activePersistenceConfigHash,
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticIndex,
+        workspaceMerkleState
+      )
+    );
+
+    return true;
+  };
+
+  const runQueuedIncrementalUpdate = (): void => {
+    if (
+      initialFileIndexBuildPending
+      || rebuildInFlight
+      || rebuildQueued
+      || rebuildTimeout !== undefined
+      || pendingUpdateJobs.length === 0
+    ) {
+      return;
+    }
+
+    if (!workspaceMerkleState) {
+      queueWorkspaceRefresh();
+      return;
+    }
+
+    const jobs = pendingUpdateJobs.splice(0, pendingUpdateJobs.length);
+    coordinator.markStale();
+    rebuildInFlight = true;
+    semanticService.cancelGeneration(buildGeneration);
+    buildGeneration += 1;
+    const generation = buildGeneration;
+    const currentConfig = getConfig();
+    semanticService = createSemanticService(semanticIndex, currentConfig, output);
+    const incrementalSemanticService = semanticService;
+    let needsFullRebuild = false;
+
+    void applyIncrementalMerkleUpdates(jobs, generation, currentConfig, incrementalSemanticService)
+      .then((completed) => {
+        if (completed && getConfig().enabled && generation === buildGeneration) {
+          coordinator.markReady();
+          return;
+        }
+
+        needsFullRebuild = getConfig().enabled;
+      })
+      .catch((error) => {
+        needsFullRebuild = getConfig().enabled;
+        output.appendLine(`Failed to apply incremental workspace updates: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        rebuildInFlight = false;
+        if (needsFullRebuild) {
+          queueWorkspaceRefresh();
+          return;
+        }
+
+        if (rebuildQueued) {
+          runQueuedRebuild();
+          return;
+        }
+
+        if (pendingUpdateJobs.length > 0) {
+          runQueuedIncrementalUpdate();
+        }
+      });
   };
 
   const queueWorkspaceRefreshForJob = (job: UpdateJob): void => {
@@ -224,7 +377,15 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    queueWorkspaceRefresh();
+    if (rebuildQueued || rebuildTimeout !== undefined) {
+      return;
+    }
+
+    pendingUpdateJobs.push({
+      ...job,
+      relativePath: normalizeWorkspaceMerklePath(job.relativePath)
+    });
+    runQueuedIncrementalUpdate();
   };
 
   const beginBuildGate = (runner: () => Promise<boolean | void>): void => {
@@ -260,6 +421,11 @@ export function activate(context: vscode.ExtensionContext): void {
         initialFileIndexBuildPending = false;
         if (rebuildQueued) {
           runQueuedRebuild();
+          return;
+        }
+
+        if (pendingUpdateJobs.length > 0) {
+          runQueuedIncrementalUpdate();
         }
       });
   };
@@ -302,9 +468,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     rebuildQueued = false;
+    pendingUpdateJobs = [];
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
     semanticService = createSemanticService(semanticIndex, getConfig(), output);
+    workspaceMerkleState = undefined;
     coordinator.markStale();
     beginBuildGate(() => coordinator.rebuild());
   };
@@ -543,10 +711,12 @@ export function activate(context: vscode.ExtensionContext): void {
           semanticService.clear();
           rebuildQueued = false;
           rebuildInFlight = false;
+          pendingUpdateJobs = [];
           fileIndex.clear();
           symbolIndex.clear();
           textIndex.clear();
           semanticIndex.clear();
+          workspaceMerkleState = undefined;
           coordinator.markStale();
           initialFileIndexBuildPending = false;
           output.appendLine('Background indexing disabled by configuration.');
@@ -577,6 +747,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
 function normalizeWorkspaceMerklePath(relativePath: string): string {
   return relativePath.replace(/\\/g, '/');
+}
+
+function isMissingFileError(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code;
+  return code === 'ENOENT' || code === 'FileNotFound';
 }
 
 function isPersistedMerkleSnapshot(snapshot: PersistedWorkspaceSnapshot['merkle'] | undefined): snapshot is PersistedMerkleSnapshot {
