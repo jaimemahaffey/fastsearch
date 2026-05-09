@@ -42,10 +42,6 @@ export class FileIndex {
     });
   }
 
-  removeForFile(_relativePath: string, key = _relativePath): void {
-    this.entries.delete(key);
-  }
-
   search(query: string): FileRecord[] {
     return [...this.entries.values()]
       .map((entry) => ({
