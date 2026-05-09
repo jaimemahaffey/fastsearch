@@ -53,12 +53,17 @@ let activeCommandSearchQuickPick: {
   suppressHideHandler: boolean;
 } | undefined;
 
+export function getCommandSearchDisplayPath(uri: string): string {
+  const parsed = vscode.Uri.parse(uri);
+  return parsed.scheme === 'file' ? parsed.fsPath : uri;
+}
+
 export function toFileSearchCandidate(record: FileRecord): CommandSearchCandidate {
   return {
     source: 'file',
     label: record.basename,
     description: record.relativePath,
-    detail: record.uri,
+    detail: getCommandSearchDisplayPath(record.uri),
     filterText: `${record.basename} ${record.relativePath}`,
     uri: record.uri,
     approximate: false
@@ -70,7 +75,7 @@ export function toTextSearchCandidate(match: TextMatch): CommandSearchCandidate 
     source: 'text',
     label: `${match.relativePath}:${match.line}`,
     description: match.preview,
-    detail: match.uri,
+    detail: getCommandSearchDisplayPath(match.uri),
     filterText: `${match.relativePath} ${match.preview}`,
     uri: match.uri,
     line: match.line - 1,
@@ -100,7 +105,9 @@ export function getSemanticSymbolDetail(uri: string, semanticMetadata?: Semantic
 }
 
 export function toSymbolSearchCandidate(symbol: SymbolRecord, semanticMetadata?: SemanticMetadata): CommandSearchCandidate {
-  const detail = getSemanticSymbolDetail(symbol.uri, semanticMetadata);
+  const detail = semanticMetadata && semanticMetadata.status === 'enriched'
+    ? getSemanticSymbolDetail(getCommandSearchDisplayPath(symbol.uri), semanticMetadata)
+    : getCommandSearchDisplayPath(symbol.uri);
   const candidate: CommandSearchCandidate = {
     source: 'symbol',
     label: symbol.name,
@@ -124,12 +131,13 @@ export function toDiscoverySearchCandidate(
   source: 'usage' | 'implementation',
   result: DiscoveryResult
 ): CommandSearchCandidate {
+  const displayPath = getCommandSearchDisplayPath(result.uri);
   return {
     source,
-    label: `${result.uri}:${result.line + 1}`,
+    label: `${displayPath}:${result.line + 1}`,
     description: undefined,
-    detail: result.uri,
-    filterText: result.uri,
+    detail: displayPath,
+    filterText: displayPath,
     uri: result.uri,
     line: result.line,
     approximate: result.approximate

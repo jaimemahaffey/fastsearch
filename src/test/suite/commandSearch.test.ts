@@ -37,11 +37,13 @@ suite('commandSearch', () => {
       approximate: true
     };
 
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse(fileRecord.uri).fsPath;
     assert.deepEqual(toFileSearchCandidate(fileRecord), {
       source: 'file',
       label: 'main.ts',
       description: 'src/app/main.ts',
-      detail: fileRecord.uri,
+      detail: displayPath,
       filterText: 'main.ts src/app/main.ts',
       uri: fileRecord.uri,
       approximate: false
@@ -50,7 +52,7 @@ suite('commandSearch', () => {
       source: 'text',
       label: 'src/app/main.ts:7',
       description: 'const alpha = beta;',
-      detail: fileRecord.uri,
+      detail: displayPath,
       filterText: 'src/app/main.ts const alpha = beta;',
       uri: fileRecord.uri,
       line: 6,
@@ -61,7 +63,7 @@ suite('commandSearch', () => {
       source: 'symbol',
       label: 'AlphaService',
       description: 'services',
-      detail: fileRecord.uri,
+      detail: displayPath,
       filterText: 'AlphaService services',
       uri: fileRecord.uri,
       line: 10,
@@ -70,10 +72,10 @@ suite('commandSearch', () => {
     });
     assert.deepEqual(toDiscoverySearchCandidate('usage', discoveryResult), {
       source: 'usage',
-      label: 'file:///workspace/src/app/main.ts:15',
+      label: `${displayPath}:15`,
       description: undefined,
-      detail: fileRecord.uri,
-      filterText: 'file:///workspace/src/app/main.ts',
+      detail: displayPath,
+      filterText: displayPath,
       uri: fileRecord.uri,
       line: 14,
       approximate: true
