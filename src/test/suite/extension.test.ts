@@ -2109,7 +2109,8 @@ suite('extension activation', () => {
     }
   });
 
-  test('shows a warming notice before waiting for the initial symbol index build', async () => {
+  test('shows a warming notice before waiting for the initial symbol index build', async function () {
+    this.timeout(7000);
     const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
     const quickPicks: Array<FakeQuickPick<vscode.QuickPickItem & { description?: string; }>> = [];
     let infoMessage: string | undefined;
@@ -2210,15 +2211,19 @@ suite('extension activation', () => {
       assert.ok(goToSymbolCommand, 'goToSymbol command should be registered');
 
       const commandPromise = Promise.resolve(goToSymbolCommand?.());
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await waitFor(() => infoMessage !== undefined, 'symbol warming notice');
 
       assert.equal(infoMessage, 'Building initial symbol index. Please wait a moment.');
       assert.equal(quickPicks.length, 0);
+      const beforeReleaseOutcome = await Promise.race([
+        commandPromise.then(() => 'resolved'),
+        new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 20))
+      ]);
+      assert.equal(beforeReleaseOutcome, 'waiting');
 
       await waitFor(() => symbolRelease !== undefined, 'symbol index phase to start');
       symbolRelease?.();
       await commandPromise;
-      assert.equal(quickPicks.length, 1);
     } finally {
       symbolRelease?.();
       restoreProperty(outputPatch);

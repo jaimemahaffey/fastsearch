@@ -10,7 +10,7 @@ import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
-import { createLayerAvailability, hasLayer, markLayerActive, markLayerAvailable } from './core/indexLayerState';
+import { createLayerAvailability, hasLayer, markLayerAvailable } from './core/indexLayerState';
 import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
@@ -116,8 +116,7 @@ export function activate(context: vscode.ExtensionContext): void {
         (layer) => {
           layerAvailability = markLayerAvailable(layerAvailability, layer);
           resolveLayerWaiters(layer);
-        },
-        persistLayerCheckpoint
+        }
       );
 
       if (completed !== false && getConfig().enabled) {
@@ -144,7 +143,7 @@ export function activate(context: vscode.ExtensionContext): void {
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
     buildWorkspace
   });
-  let initialFileIndexBuildPending = config.enabled;
+  let blockingBuildInProgress = config.enabled;
   let rebuildQueued = false;
   let rebuildInFlight = false;
   let rebuildTimeout: NodeJS.Timeout | undefined;
@@ -170,14 +169,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  const persistLayerCheckpoint = async (nextLayer?: IndexLayer): Promise<void> => {
-    if (nextLayer) {
-      layerAvailability = markLayerActive(layerAvailability, nextLayer);
-    }
-  };
-
   const runQueuedRebuild = (): void => {
-    if (initialFileIndexBuildPending || rebuildInFlight) {
+    if (blockingBuildInProgress || rebuildInFlight) {
       return;
     }
 
@@ -236,7 +229,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const beginBuildGate = (runner: () => Promise<boolean | void>): void => {
     const buildToken = ++initialBuildToken;
     activeBuildProgressToken = buildToken;
-    initialFileIndexBuildPending = true;
+    blockingBuildInProgress = true;
     initialIndexPromise = runner()
       .then((completed) => {
         if (buildToken !== initialBuildToken) {
@@ -263,7 +256,7 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
 
-        initialFileIndexBuildPending = false;
+        blockingBuildInProgress = false;
         resolveAllLayerWaiters();
         if (rebuildQueued) {
           runQueuedRebuild();
@@ -324,7 +317,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await initialSnapshotPromise;
     }
 
-    while (initialFileIndexBuildPending) {
+    while (blockingBuildInProgress) {
       const token = initialBuildToken;
       await initialIndexPromise;
       if (token === initialBuildToken) {
@@ -348,11 +341,11 @@ export function activate(context: vscode.ExtensionContext): void {
       return getConfig().enabled;
     }
 
-    if (initialFileIndexBuildPending) {
+    if (blockingBuildInProgress) {
       void vscode.window.showInformationMessage(warmingMessage);
     }
 
-    while (!hasLayer(layerAvailability, layer) && initialFileIndexBuildPending) {
+    while (!hasLayer(layerAvailability, layer) && blockingBuildInProgress) {
       await new Promise<void>((resolve) => {
         const waiters = layerWaiters.get(layer) ?? [];
         waiters.push(resolve);
@@ -387,7 +380,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     await waitForInitialSnapshotRestore();
 
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
+    if (blockingBuildInProgress && !restoredSnapshotReady) {
       void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
     }
 
@@ -450,7 +443,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    if (initialFileIndexBuildPending) {
+    if (blockingBuildInProgress) {
       void vscode.window.showInformationMessage(INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE);
       return;
     }
@@ -474,7 +467,7 @@ export function activate(context: vscode.ExtensionContext): void {
       useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowFallback
           ? async () => {
-            if (initialFileIndexBuildPending) {
+            if (blockingBuildInProgress) {
               void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
             }
 
@@ -504,7 +497,7 @@ export function activate(context: vscode.ExtensionContext): void {
       useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowSymbolFallback
           ? async () => {
-            if (initialFileIndexBuildPending) {
+            if (blockingBuildInProgress) {
               void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
             }
 
@@ -562,7 +555,7 @@ export function activate(context: vscode.ExtensionContext): void {
           textIndex.clear();
           semanticIndex.clear();
           coordinator.markStale();
-          initialFileIndexBuildPending = false;
+          blockingBuildInProgress = false;
           layerAvailability = createLayerAvailability();
           resolveAllLayerWaiters();
           output.appendLine('Background indexing disabled by configuration.');
@@ -603,15 +596,13 @@ async function buildWorkspaceIndexes(
   shouldContinue: () => boolean,
   buildStatus: IndexBuildStatusReporter,
   progressToken: number,
-  markLayerReady: (layer: IndexLayer) => void,
-  persistLayerCheckpoint: (nextLayer?: IndexLayer) => Promise<void>
+  markLayerReady: (layer: IndexLayer) => void
 ): Promise<boolean> {
   try {
     if (config.include.length === 0) {
       markLayerReady('file');
       markLayerReady('text');
       markLayerReady('symbol');
-      await persistLayerCheckpoint('semantic');
       return true;
     }
 
@@ -664,7 +655,6 @@ async function buildWorkspaceIndexes(
     }
 
     markLayerReady('file');
-    await persistLayerCheckpoint('text');
     buildStatus.advance(progressToken, {
       processedFiles: skippedFiles,
       skippedFiles,
@@ -705,7 +695,6 @@ async function buildWorkspaceIndexes(
     }
 
     markLayerReady('text');
-    await persistLayerCheckpoint('symbol');
     buildStatus.advance(progressToken, {
       processedFiles: skippedFiles,
       skippedFiles,
@@ -751,7 +740,6 @@ async function buildWorkspaceIndexes(
     }
 
     markLayerReady('symbol');
-    await persistLayerCheckpoint('semantic');
 
     return true;
   } catch (error) {
