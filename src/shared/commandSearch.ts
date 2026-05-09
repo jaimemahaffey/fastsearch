@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { DiscoveryResult } from '../commands/findUsages';
 import type { SymbolRecord } from '../indexes/symbolIndex';
 import type { TextMatch } from '../indexes/textIndex';
+import type { SemanticMetadata } from '../semantics/semanticTypes';
 import { scoreCandidate } from './matchScore';
 import type { FileRecord } from './types';
 
@@ -17,6 +18,7 @@ export type CommandSearchCandidate = {
   line?: number;
   column?: number;
   approximate: boolean;
+  semanticConfidence?: number;
 };
 
 export type CommandSearchProvider<TContext> = {
@@ -77,18 +79,45 @@ export function toTextSearchCandidate(match: TextMatch): CommandSearchCandidate 
   };
 }
 
-export function toSymbolSearchCandidate(symbol: SymbolRecord): CommandSearchCandidate {
-  return {
+export function getSemanticSymbolDetail(uri: string, semanticMetadata?: SemanticMetadata): string {
+  if (!semanticMetadata || semanticMetadata.status !== 'enriched') {
+    return uri;
+  }
+
+  const parts: string[] = [uri];
+
+  if (semanticMetadata.referenceCount !== undefined) {
+    parts.push(`${semanticMetadata.referenceCount} refs`);
+  }
+
+  if (semanticMetadata.implementationCount !== undefined) {
+    parts.push(`${semanticMetadata.implementationCount} impls`);
+  }
+
+  parts.push(semanticMetadata.provider);
+
+  return parts.join(' • ');
+}
+
+export function toSymbolSearchCandidate(symbol: SymbolRecord, semanticMetadata?: SemanticMetadata): CommandSearchCandidate {
+  const detail = getSemanticSymbolDetail(symbol.uri, semanticMetadata);
+  const candidate: CommandSearchCandidate = {
     source: 'symbol',
     label: symbol.name,
     description: symbol.containerName,
-    detail: symbol.uri,
+    detail,
     filterText: [symbol.name, symbol.containerName].filter(Boolean).join(' '),
     uri: symbol.uri,
     line: symbol.startLine,
     column: symbol.startColumn,
     approximate: symbol.approximate
   };
+
+  if (semanticMetadata && semanticMetadata.status === 'enriched') {
+    candidate.semanticConfidence = semanticMetadata.confidence;
+  }
+
+  return candidate;
 }
 
 export function toDiscoverySearchCandidate(
@@ -162,7 +191,20 @@ export function rankCommandSearchCandidates(
       score: scoreCandidate(query, candidate.filterText)
     }))
     .filter((entry) => entry.score >= 0)
-    .sort((left, right) => right.score - left.score || left.candidate.label.localeCompare(right.candidate.label))
+    .sort((left, right) => {
+      // First by score
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      // Then by semantic confidence (higher is better)
+      const leftConfidence = left.candidate.semanticConfidence ?? 0;
+      const rightConfidence = right.candidate.semanticConfidence ?? 0;
+      if (rightConfidence !== leftConfidence) {
+        return rightConfidence - leftConfidence;
+      }
+      // Finally by label
+      return left.candidate.label.localeCompare(right.candidate.label);
+    })
     .map((entry) => entry.candidate);
 }
 

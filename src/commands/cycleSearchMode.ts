@@ -2,6 +2,7 @@ import type { FastIndexerConfig } from '../configuration';
 import type { FileIndex } from '../indexes/fileIndex';
 import type { SymbolIndex } from '../indexes/symbolIndex';
 import type { TextIndex } from '../indexes/textIndex';
+import type { SemanticIndex } from '../semantics/semanticIndex';
 import { goToFile } from './goToFile';
 import { goToSymbol } from './goToSymbol';
 import { goToText } from './goToText';
@@ -44,7 +45,8 @@ export function createCycleSearchModeCommand(
   textIndex: TextIndex,
   symbolIndex: SymbolIndex,
   getConfig: () => FastIndexerConfig,
-  debugLog?: (message: string) => void
+  debugLog?: (message: string) => void,
+  semanticIndex?: SemanticIndex
 ): { execute: () => Promise<void>; reset: () => void; } {
   let activeMode: SearchMode | undefined;
 
@@ -73,7 +75,7 @@ export function createCycleSearchModeCommand(
 
     debugLog?.(`opening picker title="${presentation.title}"`);
     if (mode === 'symbol') {
-      opened = await goToSymbol(symbolIndex, behavior, {}, presentation);
+      opened = await goToSymbol(symbolIndex, behavior, {}, presentation, semanticIndex);
     } else if (mode === 'text') {
       opened = await goToText(textIndex, behavior, {}, presentation);
     } else {

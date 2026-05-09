@@ -3,6 +3,7 @@ import type { FastIndexerConfig } from '../configuration';
 import type { ExternalToolRunner } from '../externalTools/commandSearchTools';
 import { narrowCommandSearchCandidatesWithFzf } from '../externalTools/commandSearchProviders';
 import { SymbolIndex } from '../indexes/symbolIndex';
+import { createSymbolSemanticKey, type SemanticIndex } from '../semantics/semanticIndex';
 import { filterCommandSearchCandidates, presentCommandSearch, toSymbolSearchCandidate, withCommandSearchProvenanceIcon } from '../shared/commandSearch';
 
 type SymbolCommandBehavior = Partial<Pick<FastIndexerConfig, 'completionStyleResults' | 'fuzzySearch' | 'useFzf'>>;
@@ -28,7 +29,8 @@ export async function goToSymbol(
   symbolIndex: SymbolIndex,
   behavior: SymbolCommandBehavior = DEFAULT_BEHAVIOR,
   dependencies: CommandSearchDependencies = {},
-  presentation: CommandSearchPresentation = {}
+  presentation: CommandSearchPresentation = {},
+  semanticIndex?: SemanticIndex
 ): Promise<boolean> {
   if (symbolIndex.isEmpty()) {
     void vscode.window.showInformationMessage('No indexed symbols are available yet.');
@@ -36,7 +38,11 @@ export async function goToSymbol(
   }
 
   const resolvedBehavior = { ...DEFAULT_BEHAVIOR, ...behavior };
-  const candidates = symbolIndex.all().map(toSymbolSearchCandidate);
+  const candidates = symbolIndex.all().map((symbol) => {
+    const relativePath = vscode.workspace.asRelativePath(vscode.Uri.parse(symbol.uri), true);
+    const semanticMetadata = semanticIndex?.get(relativePath, createSymbolSemanticKey(symbol));
+    return toSymbolSearchCandidate(symbol, semanticMetadata);
+  });
   return presentCommandSearch({
     title: presentation.title,
     placeholder: presentation.placeholder ?? 'Search indexed symbols',

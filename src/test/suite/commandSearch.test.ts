@@ -1,9 +1,10 @@
 import * as assert from 'node:assert/strict';
 import type { DiscoveryResult } from '../../commands/findUsages';
-import { type CommandSearchProvider, collectAvailableProviderResults, getCommandSearchIcon, getCommandSearchProvenanceIcon, rankCommandSearchCandidates, toDiscoverySearchCandidate, toFileSearchCandidate, toSymbolSearchCandidate, toTextSearchCandidate } from '../../shared/commandSearch';
+import { type CommandSearchProvider, collectAvailableProviderResults, getCommandSearchIcon, getCommandSearchProvenanceIcon, getSemanticSymbolDetail, rankCommandSearchCandidates, toDiscoverySearchCandidate, toFileSearchCandidate, toSymbolSearchCandidate, toTextSearchCandidate } from '../../shared/commandSearch';
 import type { FileRecord } from '../../shared/types';
 import type { TextMatch } from '../../indexes/textIndex';
 import type { SymbolRecord } from '../../indexes/symbolIndex';
+import type { SemanticMetadata } from '../../semantics/semanticTypes';
 
 suite('commandSearch', () => {
   test('normalizes built-in result shapes into shared command search candidates', () => {
@@ -187,5 +188,55 @@ suite('commandSearch', () => {
       'File Search',
       'Go To File'
     ]);
+  });
+
+  test('formats semantic symbol detail with references, implementations, and provider', () => {
+    const semanticMetadata: SemanticMetadata = {
+      definition: { uri: 'file:///workspace/src/app/main.ts', line: 10, column: 2 },
+      implementationCount: 3,
+      referenceCount: 7,
+      provider: 'vscode',
+      status: 'enriched',
+      confidence: 1,
+      enrichedAt: 123
+    };
+
+    const detail = getSemanticSymbolDetail('file:///workspace/src/app/main.ts', semanticMetadata);
+
+    assert.equal(detail, 'file:///workspace/src/app/main.ts • 7 refs • 3 impls • vscode');
+  });
+
+  test('enriches symbol search candidates with semantic metadata', () => {
+    const symbolRecord: SymbolRecord = {
+      name: 'AlphaService',
+      kind: 5,
+      containerName: 'services',
+      uri: 'file:///workspace/src/app/main.ts',
+      startLine: 10,
+      startColumn: 2,
+      approximate: false
+    };
+    const semanticMetadata: SemanticMetadata = {
+      definition: { uri: 'file:///workspace/src/app/main.ts', line: 10, column: 2 },
+      implementationCount: 3,
+      referenceCount: 7,
+      provider: 'vscode',
+      status: 'enriched',
+      confidence: 1,
+      enrichedAt: 123
+    };
+
+    const candidate = toSymbolSearchCandidate(symbolRecord, semanticMetadata);
+
+    assert.equal(candidate.source, 'symbol');
+    assert.equal(candidate.label, 'AlphaService');
+    assert.equal(candidate.description, 'services');
+    assert.equal(candidate.detail, 'file:///workspace/src/app/main.ts • 7 refs • 3 impls • vscode');
+    assert.equal(candidate.filterText, 'AlphaService services');
+    assert.equal(candidate.uri, 'file:///workspace/src/app/main.ts');
+    assert.equal(candidate.line, 10);
+    assert.equal(candidate.column, 2);
+    assert.equal(candidate.approximate, false);
+    assert.equal(candidate.semanticConfidence, 1);
   });
 });
