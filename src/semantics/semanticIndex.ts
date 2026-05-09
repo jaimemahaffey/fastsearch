@@ -59,6 +59,10 @@ export class SemanticIndex {
     this.byFile.clear();
   }
 
+  delete(relativePath: string): void {
+    this.removeForFile(relativePath);
+  }
+
   removeForFile(relativePath: string): void {
     this.byFile.delete(relativePath);
   }

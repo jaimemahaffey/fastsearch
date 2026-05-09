@@ -2,13 +2,14 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SymbolRecord } from '../indexes/symbolIndex';
 import type { SemanticIndexFileEntry } from '../semantics/semanticIndex';
-import type { FileRecord } from '../shared/types';
+import type { FileRecord, PersistedLayerState } from '../shared/types';
 import type { PersistedMerkleSnapshot } from './merkleSnapshot';
 
 export type PersistedSnapshotMetadata = {
   schemaVersion: number;
   workspaceId: string;
   configHash: string;
+  layerState?: PersistedLayerState;
 };
 
 export type PersistedTextEntry = {

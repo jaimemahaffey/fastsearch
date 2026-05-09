@@ -9,8 +9,11 @@ import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
+import { createIndexBuildPlan } from './core/indexBuildPlanner';
 import { hashContent } from './core/contentHash';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
+import { createLayerAvailability, hasLayer, markLayerActive, markLayerAvailable, toPersistedLayerState } from './core/indexLayerState';
+import { runPhaseJobs } from './core/indexPhaseRunner';
 import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
 import { buildMerkleTree, diffMerkleLeaves, type MerkleLeafRecord, type MerkleTreeSnapshot } from './core/merkleTree';
 import { toPersistedSubtreeHashes, type PersistedMerkleSnapshot } from './core/merkleSnapshot';
@@ -23,19 +26,29 @@ import { SemanticEnrichmentService } from './semantics/semanticEnrichmentService
 import { SemanticIndex } from './semantics/semanticIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 import type { FastIndexerConfig } from './configuration';
-import type { WorkspacePersistence } from './shared/types';
+import type { IndexLayer, WorkspacePersistence } from './shared/types';
 
 const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a moment.';
+const INITIAL_FILE_LAYER_WARMING_MESSAGE = 'Building initial file index. Please wait a moment.';
+const INITIAL_TEXT_LAYER_WARMING_MESSAGE = 'Building initial text index. Please wait a moment.';
+const INITIAL_SYMBOL_LAYER_WARMING_MESSAGE = 'Building initial symbol index. Please wait a moment.';
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
 const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
 const INDEX_BUILD_STATUS_PRIORITY = 100;
 const PERSISTENCE_SCHEMA_VERSION = 2;
+const TEXT_PHASE_CONCURRENCY = 8;
+const SYMBOL_PHASE_CONCURRENCY = 1;
 
 type IndexBuildKind = 'initial' | 'rebuild';
 
 type WorkspaceMerkleEntry = MerkleLeafRecord & {
   textContent?: string;
+};
+
+type WorkspaceCandidate = {
+  uri: vscode.Uri;
+  relativePath: string;
 };
 
 type BuildWorkspaceIndexesResult = {
@@ -47,6 +60,7 @@ type BuildWorkspaceIndexesResult = {
 type IndexBuildProgress = {
   phase: 'discovering' | 'indexing';
   kind: IndexBuildKind;
+  currentLayer?: IndexLayer;
   processedFiles: number;
   totalFiles?: number;
   skippedFiles: number;
@@ -60,7 +74,7 @@ type IndexBuildStatusReporter = {
   setTotalFiles: (token: number, totalFiles: number) => void;
   advance: (
     token: number,
-    update: Pick<IndexBuildProgress, 'processedFiles' | 'skippedFiles' | 'symbolTimeouts' | 'currentFile'>
+    update: Pick<IndexBuildProgress, 'processedFiles' | 'skippedFiles' | 'symbolTimeouts' | 'currentFile' | 'currentLayer'>
   ) => void;
   finish: (token: number) => void;
 };
@@ -111,12 +125,12 @@ export function activate(context: vscode.ExtensionContext): void {
     try {
       const currentConfig = getConfig();
       const ignoreMatcher = await refreshIgnoreMatcher();
-      const completed = await buildWorkspaceIndexes(
+      const completed = await buildWorkspaceIndexesLayered(
         fileIndex,
         symbolIndex,
         textIndex,
-        semanticService,
         semanticIndex,
+        semanticService,
         generation,
         currentConfig,
         ignoreMatcher,
@@ -124,23 +138,17 @@ export function activate(context: vscode.ExtensionContext): void {
         () => getConfig().enabled && generation === buildGeneration,
         buildStatus,
         progressToken,
-        buildKind === 'initial' ? restoredSnapshot : undefined
+        buildKind === 'initial' ? restoredSnapshot : undefined,
+        (layer) => {
+          layerAvailability = markLayerAvailable(layerAvailability, layer);
+          resolveLayerWaiters(layer);
+        },
+        persistLayerCheckpoint
       );
 
       workspaceMerkleState = completed.completed ? completed.merkle : undefined;
       if (completed.completed && getConfig().enabled && completed.canPersistSnapshot && completed.merkle) {
-        await persistenceStore.writeWorkspaceSnapshot(
-          workspacePersistence.workspaceId,
-          createPersistedWorkspaceSnapshot(
-            workspacePersistence,
-            activePersistenceConfigHash,
-            fileIndex,
-            symbolIndex,
-            textIndex,
-            semanticIndex,
-            completed.merkle
-          )
-        );
+        await persistLayerCheckpoint(completed.merkle);
       }
 
       return completed.completed;
@@ -174,6 +182,40 @@ export function activate(context: vscode.ExtensionContext): void {
   let initialBuildToken = 0;
   let activeBuildProgressToken = 0;
   let currentBuildKind: IndexBuildKind = 'initial';
+  let layerAvailability = createLayerAvailability();
+  const layerWaiters = new Map<IndexLayer, Array<() => void>>();
+
+  const resolveLayerWaiters = (layer: IndexLayer): void => {
+    const waiters = layerWaiters.get(layer) ?? [];
+    layerWaiters.delete(layer);
+    waiters.forEach((resolve) => resolve());
+  };
+
+  const resolveAllLayerWaiters = (): void => {
+    for (const layer of [...layerWaiters.keys()]) {
+      resolveLayerWaiters(layer);
+    }
+  };
+
+  const persistLayerCheckpoint = async (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer): Promise<void> => {
+    if (!getConfig().enabled) {
+      return;
+    }
+
+    await persistenceStore.writeWorkspaceSnapshot(
+      workspacePersistence.workspaceId,
+      createPersistedWorkspaceSnapshot(
+        workspacePersistence,
+        activePersistenceConfigHash,
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticIndex,
+        merkleSnapshot,
+        toPersistedLayerState(activeLayer ? markLayerActive(layerAvailability, activeLayer) : layerAvailability)
+      )
+    );
+  };
 
   const runQueuedRebuild = (): void => {
     if (initialFileIndexBuildPending || rebuildInFlight) {
@@ -419,6 +461,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         initialFileIndexBuildPending = false;
+        resolveAllLayerWaiters();
         if (rebuildQueued) {
           runQueuedRebuild();
           return;
@@ -434,6 +477,7 @@ export function activate(context: vscode.ExtensionContext): void {
     currentBuildKind = 'initial';
     coordinator.markWarming();
     restoredSnapshotReady = false;
+    layerAvailability = createLayerAvailability();
     initialSnapshotRestorePending = true;
     initialSnapshotPromise = restorePersistedSnapshot(
       persistenceStore,
@@ -447,11 +491,18 @@ export function activate(context: vscode.ExtensionContext): void {
     )
       .then((snapshot) => {
         restoredSnapshot = snapshot;
-        restoredSnapshotReady = snapshot !== undefined;
+        layerAvailability = snapshot
+          ? createLayerAvailability(
+              snapshot.metadata.layerState?.availableLayers ?? ['file', 'text', 'symbol'],
+              snapshot.metadata.layerState?.activeLayer
+            )
+          : createLayerAvailability();
+        restoredSnapshotReady = hasLayer(layerAvailability, 'file');
       })
       .catch((error) => {
         restoredSnapshot = undefined;
         restoredSnapshotReady = false;
+        layerAvailability = createLayerAvailability();
         output.appendLine(`Failed to restore persisted workspace snapshot: ${error instanceof Error ? error.message : String(error)}`);
       })
       .finally(() => {
@@ -473,6 +524,7 @@ export function activate(context: vscode.ExtensionContext): void {
     buildGeneration += 1;
     semanticService = createSemanticService(semanticIndex, getConfig(), output);
     workspaceMerkleState = undefined;
+    layerAvailability = createLayerAvailability();
     coordinator.markStale();
     beginBuildGate(() => coordinator.rebuild());
   };
@@ -499,6 +551,42 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  const waitForLayer = async (layer: IndexLayer): Promise<boolean> => {
+    await waitForInitialSnapshotRestore();
+
+    if (hasLayer(layerAvailability, layer)) {
+      return getConfig().enabled;
+    }
+
+    while (initialFileIndexBuildPending && !hasLayer(layerAvailability, layer)) {
+      await new Promise<void>((resolve) => {
+        const existing = layerWaiters.get(layer) ?? [];
+        existing.push(resolve);
+        layerWaiters.set(layer, existing);
+        if (hasLayer(layerAvailability, layer) || !initialFileIndexBuildPending) {
+          resolve();
+        }
+      });
+
+      if (hasLayer(layerAvailability, layer) || !initialFileIndexBuildPending) {
+        break;
+      }
+    }
+
+    return getConfig().enabled && hasLayer(layerAvailability, layer);
+  };
+
+  const showLayerWarmingMessage = (layer: IndexLayer): void => {
+    const message = layer === 'file'
+      ? INITIAL_FILE_LAYER_WARMING_MESSAGE
+      : layer === 'text'
+        ? INITIAL_TEXT_LAYER_WARMING_MESSAGE
+        : layer === 'symbol'
+          ? INITIAL_SYMBOL_LAYER_WARMING_MESSAGE
+          : INITIAL_INDEXES_WARMING_MESSAGE;
+    void vscode.window.showInformationMessage(message);
+  };
+
   if (config.enabled) {
     startInitialBuild();
   }
@@ -523,11 +611,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     await waitForInitialSnapshotRestore();
 
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+    if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'symbol')) {
+      showLayerWarmingMessage('symbol');
     }
 
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('symbol')) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -544,11 +632,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     await waitForInitialSnapshotRestore();
 
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+    if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'file')) {
+      showLayerWarmingMessage('file');
     }
 
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('file')) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -565,11 +653,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     await waitForInitialSnapshotRestore();
 
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+    if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'text')) {
+      showLayerWarmingMessage('text');
     }
 
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('text')) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -586,11 +674,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     await waitForInitialSnapshotRestore();
 
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+    if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'symbol')) {
+      showLayerWarmingMessage('symbol');
     }
 
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('symbol')) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -719,6 +807,7 @@ export function activate(context: vscode.ExtensionContext): void {
           workspaceMerkleState = undefined;
           coordinator.markStale();
           initialFileIndexBuildPending = false;
+          resolveAllLayerWaiters();
           output.appendLine('Background indexing disabled by configuration.');
           return;
         }
@@ -1309,6 +1398,412 @@ async function buildWorkspaceIndexes(
   }
 }
 
+function pruneRestoredWorkspaceEntries(
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex,
+  semanticIndex: SemanticIndex,
+  candidates: WorkspaceCandidate[]
+): void {
+  const currentRelativePaths = new Set(candidates.map((candidate) => normalizeWorkspaceMerklePath(candidate.relativePath)));
+  const currentFileKeys = new Set(candidates.map((candidate) => toIndexedFileKey(candidate.uri, candidate.relativePath)));
+
+  for (const entry of fileIndex.all()) {
+    const key = toIndexedSnapshotKey(entry);
+    if (!currentFileKeys.has(key)) {
+      fileIndex.removeForFile(entry.relativePath, key);
+    }
+  }
+
+  for (const entry of textIndex.allContents()) {
+    if (!currentRelativePaths.has(normalizeWorkspaceMerklePath(entry.relativePath))) {
+      textIndex.removeForFile(entry.relativePath);
+    }
+  }
+
+  for (const entry of symbolIndex.allByFile()) {
+    if (!currentRelativePaths.has(normalizeWorkspaceMerklePath(entry.relativePath))) {
+      symbolIndex.removeForFile(entry.relativePath);
+    }
+  }
+
+  for (const entry of semanticIndex.allByFile()) {
+    if (!currentRelativePaths.has(normalizeWorkspaceMerklePath(entry.relativePath))) {
+      semanticIndex.removeForFile(entry.relativePath);
+    }
+  }
+}
+
+function canReuseSnapshotLayer(snapshot: PersistedWorkspaceSnapshot | undefined, layer: IndexLayer): boolean {
+  return snapshot?.metadata.layerState?.availableLayers.includes(layer) ?? snapshot !== undefined;
+}
+
+function createReuseHintsFromSnapshot(
+  previousSnapshot: PersistedWorkspaceSnapshot | undefined,
+  currentMerkle: { tree: MerkleTreeSnapshot; leavesByPath: Map<string, WorkspaceMerkleEntry>; }
+): {
+  file: Set<string>;
+  text: Set<string>;
+  symbol: Set<string>;
+} {
+  const reuseHints = {
+    file: new Set<string>(),
+    text: new Set<string>(),
+    symbol: new Set<string>()
+  };
+
+  const previousMerkle = isPersistedMerkleSnapshot(previousSnapshot?.merkle) ? previousSnapshot.merkle : undefined;
+  if (!previousSnapshot || !previousMerkle) {
+    return reuseHints;
+  }
+
+  const previousLeaves = createPersistedMerkleLeafMap(previousMerkle.leaves) as Map<string, MerkleLeafRecord>;
+  const previousTextEntries = new Map(
+    previousSnapshot.textIndex.map((entry) => [normalizeWorkspaceMerklePath(entry.relativePath), entry] as const)
+  );
+  const previousSymbolEntries = new Map(
+    previousSnapshot.symbolIndex.map((entry) => [normalizeWorkspaceMerklePath(entry.relativePath), entry] as const)
+  );
+  const diff = diffMerkleLeaves(previousLeaves, currentMerkle.leavesByPath);
+
+  for (const leaf of diff.unchanged) {
+    if (canReuseSnapshotLayer(previousSnapshot, 'file')) {
+      reuseHints.file.add(leaf.relativePath);
+    }
+
+    if (canReuseSnapshotLayer(previousSnapshot, 'text')) {
+      const previousTextEntry = previousTextEntries.get(leaf.relativePath);
+      if (previousTextEntry?.contentHash === leaf.contentHash) {
+        reuseHints.text.add(leaf.relativePath);
+      }
+    }
+
+    if (canReuseSnapshotLayer(previousSnapshot, 'symbol')) {
+      const previousSymbolEntry = previousSymbolEntries.get(leaf.relativePath);
+      if (previousSymbolEntry?.contentHash && previousSymbolEntry.contentHash === leaf.contentHash) {
+        reuseHints.symbol.add(leaf.relativePath);
+      }
+    }
+  }
+
+  return reuseHints;
+}
+
+async function buildCurrentWorkspaceMerkleFromCandidates(
+  candidates: WorkspaceCandidate[],
+  config: FastIndexerConfig,
+  output: vscode.OutputChannel,
+  shouldContinue: () => boolean,
+  buildStatus: IndexBuildStatusReporter,
+  progressToken: number,
+  skippedFiles: number
+): Promise<{ tree: MerkleTreeSnapshot; leavesByPath: Map<string, WorkspaceMerkleEntry>; } | undefined> {
+  const leaves: WorkspaceMerkleEntry[] = [];
+  let processedFiles = skippedFiles;
+  const symbolTimeouts = 0;
+  let stop = false;
+  let readFailed = false;
+
+  buildStatus.advance(progressToken, {
+    processedFiles,
+    skippedFiles,
+    symbolTimeouts,
+    currentFile: undefined,
+    currentLayer: 'text'
+  });
+
+  await runPhaseJobs(candidates, TEXT_PHASE_CONCURRENCY, async (candidate) => {
+    if (stop || !shouldContinue()) {
+      stop = true;
+      return;
+    }
+
+    try {
+      const leaf = await readWorkspaceMerkleEntry(candidate.uri, normalizeWorkspaceMerklePath(candidate.relativePath), config);
+      if (!shouldContinue()) {
+        stop = true;
+        return;
+      }
+      leaves.push(leaf);
+    } catch (error) {
+      output.appendLine(
+        `Failed to read ${candidate.relativePath} for Merkle indexing: ${error instanceof Error ? error.message : String(error)}`
+      );
+      readFailed = true;
+      stop = true;
+      return;
+    }
+
+    processedFiles += 1;
+    buildStatus.advance(progressToken, {
+      processedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: candidate.relativePath,
+      currentLayer: 'text'
+    });
+    if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles - skippedFiles)) {
+      await yieldToEventLoop();
+    }
+  });
+
+  if (readFailed || stop || !shouldContinue()) {
+    return undefined;
+  }
+
+  try {
+    const tree = buildMerkleTree(leaves);
+    return {
+      tree,
+      leavesByPath: createWorkspaceMerkleLeafMap(leaves)
+    };
+  } catch (error) {
+    output.appendLine(`Failed to build workspace Merkle tree: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+async function buildWorkspaceIndexesLayered(
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex,
+  semanticIndex: SemanticIndex,
+  semanticService: SemanticEnrichmentService,
+  generation: number,
+  config: FastIndexerConfig,
+  ignoreMatcher: IgnoreMatcher,
+  output: vscode.OutputChannel,
+  shouldContinue: () => boolean,
+  buildStatus: IndexBuildStatusReporter,
+  progressToken: number,
+  previousSnapshot: PersistedWorkspaceSnapshot | undefined,
+  markLayerReady: (layer: IndexLayer) => void,
+  persistCheckpoint: (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer) => Promise<void>
+): Promise<BuildWorkspaceIndexesResult> {
+  try {
+    if (config.include.length === 0) {
+      markLayerReady('file');
+      markLayerReady('text');
+      markLayerReady('symbol');
+      return { completed: true, canPersistSnapshot: false };
+    }
+
+    const files = await vscode.workspace.findFiles(
+      toGlobExpression(config.include, '**/*'),
+      toGlobExpression([WORKSPACE_FILE_EXCLUDE_GLOB, ...config.exclude], WORKSPACE_FILE_EXCLUDE_GLOB)
+    );
+    const candidates = files
+      .map((file) => ({
+        uri: file,
+        relativePath: normalizeWorkspaceMerklePath(vscode.workspace.asRelativePath(file, true))
+      }))
+      .filter((candidate) => !ignoreMatcher.ignores(candidate.uri.fsPath, candidate.relativePath));
+    const sortedCandidates = createIndexBuildPlan(candidates, {
+      file: new Set(),
+      text: new Set(),
+      symbol: new Set()
+    }).filePhase;
+    const skippedFiles = files.length - sortedCandidates.length;
+    const restoredFileLayer = canReuseSnapshotLayer(previousSnapshot, 'file');
+    let symbolTimeouts = 0;
+
+    pruneRestoredWorkspaceEntries(fileIndex, symbolIndex, textIndex, semanticIndex, sortedCandidates);
+    buildStatus.setTotalFiles(progressToken, files.length);
+    if (!restoredFileLayer) {
+      buildStatus.advance(progressToken, {
+        processedFiles: skippedFiles,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: undefined,
+        currentLayer: 'file'
+      });
+
+      let filePhaseProcessed = skippedFiles;
+      for (const candidate of sortedCandidates) {
+        if (!shouldContinue()) {
+          return { completed: false, canPersistSnapshot: false };
+        }
+
+        fileIndex.upsert(candidate.relativePath, candidate.uri.toString(), toIndexedFileKey(candidate.uri, candidate.relativePath));
+        filePhaseProcessed += 1;
+        buildStatus.advance(progressToken, {
+          processedFiles: filePhaseProcessed,
+          skippedFiles,
+          symbolTimeouts,
+          currentFile: candidate.relativePath,
+          currentLayer: 'file'
+        });
+        if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, filePhaseProcessed - skippedFiles)) {
+          await yieldToEventLoop();
+        }
+      }
+
+      markLayerReady('file');
+    }
+
+    const currentMerkle = await buildCurrentWorkspaceMerkleFromCandidates(
+      sortedCandidates,
+      config,
+      output,
+      shouldContinue,
+      buildStatus,
+      progressToken,
+      skippedFiles
+    );
+    if (!currentMerkle) {
+      const fallback = await buildWorkspaceIndexesFull(
+        sortedCandidates.map((candidate) => candidate.uri),
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticService,
+        generation,
+        config,
+        ignoreMatcher,
+        output,
+        shouldContinue,
+        buildStatus,
+        progressToken,
+        semanticIndex,
+        true
+      );
+      if (fallback.completed) {
+        markLayerReady('file');
+        markLayerReady('text');
+        markLayerReady('symbol');
+      }
+      return fallback;
+    }
+
+    await persistCheckpoint(currentMerkle.tree, 'text');
+
+    const reuseHints = createReuseHintsFromSnapshot(previousSnapshot, currentMerkle);
+    const plan = createIndexBuildPlan(sortedCandidates, reuseHints);
+    if (restoredFileLayer) {
+      for (const candidate of plan.filePhase) {
+        if (!shouldContinue()) {
+          return { completed: false, canPersistSnapshot: false };
+        }
+
+        fileIndex.upsert(candidate.relativePath, candidate.uri.toString(), toIndexedFileKey(candidate.uri, candidate.relativePath));
+      }
+    }
+    let textPhaseProcessed = skippedFiles + reuseHints.text.size;
+    let stopTextPhase = false;
+
+    buildStatus.advance(progressToken, {
+      processedFiles: textPhaseProcessed,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: undefined,
+      currentLayer: 'text'
+    });
+
+    await runPhaseJobs(plan.textPhase, TEXT_PHASE_CONCURRENCY, async (candidate) => {
+      if (stopTextPhase || !shouldContinue()) {
+        stopTextPhase = true;
+        return;
+      }
+
+      const leaf = currentMerkle.leavesByPath.get(normalizeWorkspaceMerklePath(candidate.relativePath));
+      if (!leaf || leaf.textContent === undefined) {
+        textIndex.removeForFile(candidate.relativePath);
+      } else {
+        textIndex.upsert(candidate.relativePath, candidate.uri.toString(), leaf.textContent);
+      }
+
+      textPhaseProcessed += 1;
+      buildStatus.advance(progressToken, {
+        processedFiles: textPhaseProcessed,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: candidate.relativePath,
+        currentLayer: 'text'
+      });
+      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, textPhaseProcessed - skippedFiles)) {
+        await yieldToEventLoop();
+      }
+    });
+
+    if (stopTextPhase || !shouldContinue()) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    markLayerReady('text');
+    await persistCheckpoint(currentMerkle.tree, 'symbol');
+
+    let symbolPhaseProcessed = skippedFiles + reuseHints.symbol.size;
+    let stopSymbolPhase = false;
+    buildStatus.advance(progressToken, {
+      processedFiles: symbolPhaseProcessed,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: undefined,
+      currentLayer: 'symbol'
+    });
+
+    await runPhaseJobs(plan.symbolPhase, SYMBOL_PHASE_CONCURRENCY, async (candidate) => {
+      if (stopSymbolPhase || !shouldContinue()) {
+        stopSymbolPhase = true;
+        return;
+      }
+
+      const leaf = currentMerkle.leavesByPath.get(normalizeWorkspaceMerklePath(candidate.relativePath));
+      if (!leaf) {
+        symbolIndex.removeForFile(candidate.relativePath);
+        semanticIndex.removeForFile(candidate.relativePath);
+      } else {
+        const result = await refreshWorkspaceSymbolsOnly(
+          candidate.uri,
+          candidate.relativePath,
+          config,
+          generation,
+          output,
+          shouldContinue,
+          semanticService,
+          symbolIndex,
+          semanticIndex
+        );
+
+        if (result.aborted) {
+          stopSymbolPhase = true;
+          return;
+        }
+
+        if (result.symbolTimedOut) {
+          symbolTimeouts += 1;
+        }
+      }
+
+      symbolPhaseProcessed += 1;
+      buildStatus.advance(progressToken, {
+        processedFiles: symbolPhaseProcessed,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: candidate.relativePath,
+        currentLayer: 'symbol'
+      });
+      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, symbolPhaseProcessed - skippedFiles)) {
+        await yieldToEventLoop();
+      }
+    });
+
+    if (stopSymbolPhase || !shouldContinue()) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    markLayerReady('symbol');
+    return {
+      completed: true,
+      canPersistSnapshot: true,
+      merkle: currentMerkle.tree
+    };
+  } catch (error) {
+    output.appendLine(`Failed to build initial file index: ${error instanceof Error ? error.message : String(error)}`);
+    return { completed: false, canPersistSnapshot: false };
+  }
+}
+
 export async function readEligibleTextContent(
   fileSystem: Pick<typeof vscode.workspace.fs, 'stat' | 'readFile'>,
   file: vscode.Uri,
@@ -1391,7 +1886,8 @@ function createPersistedWorkspaceSnapshot(
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
   semanticIndex: SemanticIndex,
-  merkleSnapshot: MerkleTreeSnapshot
+  merkleSnapshot: MerkleTreeSnapshot,
+  layerState?: PersistedWorkspaceSnapshot['metadata']['layerState']
 ): PersistedWorkspaceSnapshot {
   const persistedMerkleLeaves = [...merkleSnapshot.leavesByPath.values()].map((leaf) => ({
     relativePath: leaf.relativePath,
@@ -1413,7 +1909,8 @@ function createPersistedWorkspaceSnapshot(
     metadata: {
       schemaVersion: PERSISTENCE_SCHEMA_VERSION,
       workspaceId: workspacePersistence.workspaceId,
-      configHash: persistenceConfigHash
+      configHash: persistenceConfigHash,
+      ...(layerState ? { layerState } : {})
     },
     fileIndex: fileIndex.all().filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath))),
     merkle: {
