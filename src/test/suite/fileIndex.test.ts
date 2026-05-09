@@ -43,4 +43,25 @@ suite('FileIndex', () => {
     assert.equal(index.isEmpty(), true);
     assert.deepEqual(index.search('main'), []);
   });
+
+  test('removeForFile deletes one indexed file entry', () => {
+    const index = new FileIndex();
+    index.upsert('src/app/main.ts', 'c:/ws/src/app/main.ts');
+    index.upsert('src/app/service.ts', 'c:/ws/src/app/service.ts');
+
+    index.removeForFile('src/app/main.ts');
+
+    assert.deepEqual(index.search('main'), []);
+    assert.equal(index.search('service').length, 1);
+  });
+
+  test('moveFile preserves file metadata under the new relative path', () => {
+    const index = new FileIndex();
+    index.upsert('src/old.ts', 'file:///workspace/src/old.ts');
+
+    index.moveFile('src/old.ts', 'src/new.ts', 'file:///workspace/src/new.ts');
+
+    assert.deepEqual(index.search('old'), []);
+    assert.deepEqual(index.search('new').map((entry) => entry.relativePath), ['src/new.ts']);
+  });
 });

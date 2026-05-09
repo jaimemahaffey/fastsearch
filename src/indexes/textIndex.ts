@@ -30,6 +30,20 @@ export class TextIndex {
     this.contents.clear();
   }
 
+  removeForFile(relativePath: string): void {
+    this.contents.delete(relativePath);
+  }
+
+  moveFile(fromRelativePath: string, toRelativePath: string, toUri: string): void {
+    const existing = this.contents.get(fromRelativePath);
+    if (!existing) {
+      return;
+    }
+
+    this.contents.delete(fromRelativePath);
+    this.contents.set(toRelativePath, { uri: toUri, content: existing.content });
+  }
+
   upsert(relativePath: string, uri: string, content: string): void {
     this.contents.set(relativePath, { uri, content });
   }

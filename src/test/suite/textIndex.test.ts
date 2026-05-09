@@ -59,6 +59,27 @@ suite('TextIndex', () => {
     assert.equal(index.isEmpty(), true);
     assert.deepEqual(index.search('alpha'), []);
   });
+
+  test('removeForFile deletes indexed text content for one path', () => {
+    const index = new TextIndex();
+    index.upsert('src/alpha.ts', 'file:///c:/ws/src/alpha.ts', 'alpha');
+    index.upsert('src/beta.ts', 'file:///c:/ws/src/beta.ts', 'beta');
+
+    index.removeForFile('src/alpha.ts');
+
+    assert.deepEqual(index.search('alpha'), []);
+    assert.equal(index.search('beta').length, 1);
+  });
+
+  test('moveFile preserves text content under the new relative path', () => {
+    const index = new TextIndex();
+    index.upsert('src/old.ts', 'file:///c:/ws/src/old.ts', 'alpha');
+
+    index.moveFile('src/old.ts', 'src/new.ts', 'file:///c:/ws/src/new.ts');
+
+    assert.deepEqual(index.search('alpha').map((match) => match.relativePath), ['src/new.ts']);
+    assert.deepEqual(index.search('old'), []);
+  });
 });
 
 suite('isEligibleTextFile', () => {

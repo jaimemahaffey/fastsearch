@@ -17,6 +17,20 @@ export class FileIndex {
     this.entries.clear();
   }
 
+  removeForFile(relativePath: string, key = relativePath): void {
+    this.entries.delete(key);
+  }
+
+  moveFile(fromRelativePath: string, toRelativePath: string, toUri: string, fromKey = fromRelativePath, toKey = toRelativePath): void {
+    const existing = this.entries.get(fromKey);
+    if (!existing) {
+      return;
+    }
+
+    this.entries.delete(fromKey);
+    this.upsert(toRelativePath, toUri, toKey);
+  }
+
   upsert(relativePath: string, uri: string, key = relativePath): void {
     this.entries.set(key, {
       relativePath,
