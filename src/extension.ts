@@ -125,7 +125,7 @@ export function activate(context: vscode.ExtensionContext): void {
         buildKind === 'initial' ? restoredSnapshot : undefined
       );
 
-      if (completed.completed && getConfig().enabled && completed.canPersistSnapshot) {
+      if (completed.completed && getConfig().enabled && completed.canPersistSnapshot && completed.merkle) {
         await persistenceStore.writeWorkspaceSnapshot(
           workspacePersistence.workspaceId,
           createPersistedWorkspaceSnapshot(
@@ -598,6 +598,25 @@ function createWorkspaceMerkleLeafMap(leaves: WorkspaceMerkleEntry[]): Map<strin
   return new Map(leaves.map((leaf) => [normalizeWorkspaceMerklePath(leaf.relativePath), leaf] as const));
 }
 
+async function readWorkspaceMerkleEntry(
+  file: vscode.Uri,
+  relativePath: string,
+  config: FastIndexerConfig
+): Promise<WorkspaceMerkleEntry> {
+  const bytes = await vscode.workspace.fs.readFile(file);
+  const size = bytes.byteLength;
+  const entry: WorkspaceMerkleEntry = {
+    relativePath,
+    uri: file.toString(),
+    contentHash: hashContent(Buffer.from(bytes)),
+    size
+  };
+  if (isEligibleTextFile(relativePath, size, config.maxFileSizeKb)) {
+    entry.textContent = Buffer.from(bytes).toString('utf8');
+  }
+  return entry;
+}
+
 function createPersistedMerkleLeafMap(leaves: PersistedWorkspaceSnapshot['merkle']['leaves']): Map<string, PersistedWorkspaceSnapshot['merkle']['leaves'][number]> {
   return new Map(leaves.map((leaf) => [normalizeWorkspaceMerklePath(leaf.relativePath), leaf] as const));
 }
@@ -746,18 +765,7 @@ async function buildCurrentWorkspaceMerkle(
     }
 
     try {
-      const bytes = await vscode.workspace.fs.readFile(file);
-      const size = bytes.byteLength;
-      const entry: WorkspaceMerkleEntry = {
-        relativePath,
-        uri: file.toString(),
-        contentHash: hashContent(Buffer.from(bytes)),
-        size
-      };
-      if (isEligibleTextFile(relativePath, size, config.maxFileSizeKb)) {
-        entry.textContent = Buffer.from(bytes).toString('utf8');
-      }
-      leaves.push(entry);
+      leaves.push(await readWorkspaceMerkleEntry(file, relativePath, config));
     } catch (error) {
       output.appendLine(`Failed to read ${relativePath} for Merkle indexing: ${error instanceof Error ? error.message : String(error)}`);
       return undefined;
@@ -800,8 +808,17 @@ async function buildWorkspaceIndexesFull(
   shouldContinue: () => boolean,
   buildStatus: IndexBuildStatusReporter,
   progressToken: number,
-  semanticIndex: SemanticIndex
+  semanticIndex: SemanticIndex,
+  clearExistingEntries = false
 ): Promise<BuildWorkspaceIndexesResult> {
+  if (clearExistingEntries) {
+    fileIndex.clear();
+    symbolIndex.clear();
+    textIndex.clear();
+    semanticIndex.clear();
+  }
+
+  const merkleLeaves: WorkspaceMerkleEntry[] = [];
   let processedFiles = 0;
   let skippedFiles = 0;
   let symbolTimeouts = 0;
@@ -828,6 +845,32 @@ async function buildWorkspaceIndexesFull(
       continue;
     }
 
+    let merkleEntry: WorkspaceMerkleEntry | undefined;
+    try {
+      merkleEntry = await readWorkspaceMerkleEntry(file, relativePath, config);
+    } catch (error) {
+      output.appendLine(`Failed to read ${relativePath} for Merkle indexing: ${error instanceof Error ? error.message : String(error)}`);
+      try {
+        merkleEntry = await readWorkspaceMerkleEntry(file, relativePath, config);
+      } catch (retryError) {
+        skippedFiles += 1;
+        processedFiles += 1;
+        output.appendLine(`Skipping ${relativePath} because Merkle indexing could not read the file: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
+        buildStatus.advance(progressToken, {
+          processedFiles,
+          skippedFiles,
+          symbolTimeouts,
+          currentFile: relativePath
+        });
+        if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
+          await yieldToEventLoop();
+        }
+        continue;
+      }
+    }
+
+    merkleLeaves.push(merkleEntry);
+
     const result = await reindexWorkspaceFile(
       file,
       relativePath,
@@ -839,7 +882,8 @@ async function buildWorkspaceIndexesFull(
       fileIndex,
       symbolIndex,
       textIndex,
-      semanticIndex
+      semanticIndex,
+      merkleEntry.textContent
     );
 
     if (result.aborted) {
@@ -862,7 +906,16 @@ async function buildWorkspaceIndexesFull(
     }
   }
 
-  return { completed: true, canPersistSnapshot: true };
+  try {
+    return {
+      completed: true,
+      canPersistSnapshot: true,
+      merkle: buildMerkleTree(merkleLeaves)
+    };
+  } catch (error) {
+    output.appendLine(`Failed to build workspace Merkle tree: ${error instanceof Error ? error.message : String(error)}`);
+    return { completed: true, canPersistSnapshot: false };
+  }
 }
 
 async function reconcileWorkspaceIndexesFromMerkle(
@@ -1025,7 +1078,7 @@ async function buildWorkspaceIndexes(
     if (safePreviousMerkle) {
       const currentMerkle = await buildCurrentWorkspaceMerkle(files, config, ignoreMatcher, output, shouldContinue, buildStatus, progressToken);
       if (!currentMerkle) {
-        const fallback = await buildWorkspaceIndexesFull(
+        return await buildWorkspaceIndexesFull(
           files,
           fileIndex,
           symbolIndex,
@@ -1038,12 +1091,9 @@ async function buildWorkspaceIndexes(
           shouldContinue,
           buildStatus,
           progressToken,
-          semanticIndex
+          semanticIndex,
+          true
         );
-        return {
-          ...fallback,
-          canPersistSnapshot: false
-        };
       }
 
       return await reconcileWorkspaceIndexesFromMerkle(
@@ -1166,48 +1216,46 @@ function createPersistedWorkspaceSnapshot(
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
   semanticIndex: SemanticIndex,
-  merkleSnapshot?: MerkleTreeSnapshot
+  merkleSnapshot: MerkleTreeSnapshot
 ): PersistedWorkspaceSnapshot {
-  const persistedTextEntries = textIndex.allContents().map((entry) => ({
-    relativePath: entry.relativePath,
-    uri: entry.uri,
-    content: entry.content,
-    contentHash: hashContent(entry.content)
-  }));
-  const contentHashByPath = new Map(persistedTextEntries.map((entry) => [entry.relativePath, entry.contentHash] as const));
-  const merkle = merkleSnapshot ?? buildMerkleTree(
-    persistedTextEntries.map((entry) => ({
-      relativePath: entry.relativePath,
-      uri: entry.uri,
-      contentHash: entry.contentHash,
-      size: Buffer.byteLength(entry.content, 'utf8')
-    }))
-  );
-  const persistedMerkleLeaves = [...merkle.leavesByPath.values()].map((leaf) => ({
+  const persistedMerkleLeaves = [...merkleSnapshot.leavesByPath.values()].map((leaf) => ({
     relativePath: leaf.relativePath,
     uri: leaf.uri,
     contentHash: leaf.contentHash,
     size: leaf.size
   }));
+  const merkleTrackedPaths = new Set(persistedMerkleLeaves.map((leaf) => normalizeWorkspaceMerklePath(leaf.relativePath)));
+  const contentHashByPath = new Map(persistedMerkleLeaves.map((leaf) => [normalizeWorkspaceMerklePath(leaf.relativePath), leaf.contentHash] as const));
+  const persistedTextEntries = textIndex.allContents()
+    .filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath)))
+    .map((entry) => ({
+      relativePath: entry.relativePath,
+      uri: entry.uri,
+      content: entry.content,
+      contentHash: contentHashByPath.get(normalizeWorkspaceMerklePath(entry.relativePath)) ?? hashContent(entry.content)
+    }));
   return {
     metadata: {
       schemaVersion: PERSISTENCE_SCHEMA_VERSION,
       workspaceId: workspacePersistence.workspaceId,
       configHash: persistenceConfigHash
     },
-    fileIndex: fileIndex.all(),
+    fileIndex: fileIndex.all().filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath))),
     merkle: {
-      rootHash: merkle.rootHash,
-      subtreeHashes: toPersistedSubtreeHashes(merkle.subtreeHashes),
+      rootHash: merkleSnapshot.rootHash,
+      subtreeHashes: toPersistedSubtreeHashes(merkleSnapshot.subtreeHashes),
       leaves: persistedMerkleLeaves
     },
     textIndex: persistedTextEntries,
-    symbolIndex: symbolIndex.allByFile().map((entry) => ({
-      relativePath: entry.relativePath,
-      contentHash: contentHashByPath.get(entry.relativePath) ?? null,
-      symbols: entry.symbols
-    })),
+    symbolIndex: symbolIndex.allByFile()
+      .filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath)))
+      .map((entry) => ({
+        relativePath: entry.relativePath,
+        contentHash: contentHashByPath.get(normalizeWorkspaceMerklePath(entry.relativePath)) ?? null,
+        symbols: entry.symbols
+      })),
     semanticIndex: semanticIndex.allByFile()
+      .filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath)))
   };
 }
 
