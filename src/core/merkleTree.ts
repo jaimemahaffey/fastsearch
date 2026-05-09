@@ -24,23 +24,79 @@ function hashParts(parts: string[]): string {
   return createHash('sha256').update(parts.join('\n'), 'utf8').digest('hex');
 }
 
+function normalizeRelativePath(relativePath: string): string {
+  return relativePath.replace(/\\/g, '/');
+}
+
+type MerkleNode = {
+  children: Map<string, MerkleNode>;
+  leaf?: MerkleLeafRecord;
+};
+
+function createNode(): MerkleNode {
+  return { children: new Map<string, MerkleNode>() };
+}
+
+function hashDirectChildren(entries: Array<[string, string]>): string {
+  return hashParts(
+    entries
+      .slice()
+      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+      .map(([name, hash]) => `${name}:${hash}`)
+  );
+}
+
 export function buildMerkleTree(leaves: MerkleLeafRecord[]): MerkleTreeSnapshot {
-  const sortedLeaves = [...leaves].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  const normalizedLeaves = leaves.map((leaf) => {
+    const relativePath = normalizeRelativePath(leaf.relativePath);
+    return relativePath === leaf.relativePath
+      ? leaf
+      : { ...leaf, relativePath };
+  });
+  const sortedLeaves = [...normalizedLeaves].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   const leavesByPath = new Map(sortedLeaves.map((leaf) => [leaf.relativePath, leaf]));
-  const subtreeHashes = new Map<string, string>();
+  const root = createNode();
 
   for (const leaf of sortedLeaves) {
     const segments = leaf.relativePath.split('/');
-    for (let index = 1; index <= segments.length; index += 1) {
-      const pathKey = segments.slice(0, index).join('/');
-      const current = subtreeHashes.get(pathKey) ?? '';
-      subtreeHashes.set(pathKey, hashParts([current, leaf.contentHash, leaf.relativePath]));
+    let current = root;
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const pathKey = segments.slice(0, index + 1).join('/');
+      let child = current.children.get(segment);
+      if (!child) {
+        child = createNode();
+        current.children.set(segment, child);
+      }
+      if (index < segments.length - 1 && child.leaf) {
+        throw new Error(`Cannot build Merkle tree: file path "${pathKey}" has nested descendants`);
+      }
+      if (index === segments.length - 1) {
+        if (child.children.size > 0) {
+          throw new Error(`Cannot build Merkle tree: path "${leaf.relativePath}" collides with an existing directory`);
+        }
+        child.leaf = leaf;
+      }
+      current = child;
     }
   }
 
-  const rootHash = hashParts(
-    sortedLeaves.map((leaf) => `${leaf.relativePath}:${leaf.contentHash}`)
-  );
+  const subtreeHashes = new Map<string, string>();
+
+  function hashNode(node: MerkleNode, pathKey: string): string {
+    if (node.leaf && node.children.size === 0) {
+      return node.leaf.contentHash;
+    }
+
+    const childEntries = [...node.children.entries()].map(([name, child]) => [name, hashNode(child, pathKey ? `${pathKey}/${name}` : name)] as const);
+    const hash = hashDirectChildren(childEntries.map(([name, childHash]) => [name, childHash]));
+    if (pathKey) {
+      subtreeHashes.set(pathKey, hash);
+    }
+    return hash;
+  }
+
+  const rootHash = hashNode(root, '');
 
   return { rootHash, subtreeHashes, leavesByPath };
 }
