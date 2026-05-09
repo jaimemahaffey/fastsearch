@@ -3000,10 +3000,10 @@ suite('extension activation', () => {
 
       // Wait for initial build and persistence to complete
       await waitFor(() => persistedWrites === 1, 'initial snapshot persistence', 2000);
-      
+
       // Assert that semantic provider started (enrichment began)
       assert.ok(semanticProviderStarted, 'semantic enrichment should have started');
-      
+
       // Assert that persistence completed despite slow semantic provider
       assert.equal(persistedWrites, 1, 'snapshot should be persisted even when semantic providers are slow');
     } finally {

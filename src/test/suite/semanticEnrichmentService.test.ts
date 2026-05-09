@@ -11,7 +11,7 @@ suite('semantic enrichment service', () => {
     const semanticIndex = new SemanticIndex();
     const providers = createMockProviders();
     let time = 1000;
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,
@@ -34,7 +34,7 @@ suite('semantic enrichment service', () => {
 
     // Enqueue should return immediately
     service.enqueueFile('test.ts', symbols, 1);
-    
+
     // The symbol should not be enriched yet (background work not awaited)
     const keyBefore = createSymbolSemanticKey(symbols[0]);
     const metadataBefore = semanticIndex.get('test.ts', keyBefore);
@@ -57,7 +57,7 @@ suite('semantic enrichment service', () => {
     const semanticIndex = new SemanticIndex();
     const providers = createMockProviders();
     let time = 1000;
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,
@@ -80,7 +80,7 @@ suite('semantic enrichment service', () => {
 
     // Enqueue generation 1
     service.enqueueFile('test.ts', symbols, 1);
-    
+
     // Cancel generation 1 before it completes
     service.cancelGeneration(1);
 
@@ -96,7 +96,7 @@ suite('semantic enrichment service', () => {
   test('marks timeout status when a provider exceeds timeout', async () => {
     const semanticIndex = new SemanticIndex();
     let time = 1000;
-    
+
     // Create providers that will timeout
     const providers = {
       getDefinitions: async (uri: any, position: any): Promise<ProviderCallResult<SemanticTarget[]>> => {
@@ -119,7 +119,7 @@ suite('semantic enrichment service', () => {
         return { ok: true, value: undefined };
       }
     };
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,
@@ -141,7 +141,7 @@ suite('semantic enrichment service', () => {
     ];
 
     service.enqueueFile('test.ts', symbols, 1);
-    
+
     await service.idle();
 
     // Metadata should have timeout status
@@ -154,7 +154,7 @@ suite('semantic enrichment service', () => {
   test('skips approximate symbols', async () => {
     const semanticIndex = new SemanticIndex();
     const providers = createMockProviders();
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,
@@ -187,7 +187,7 @@ suite('semantic enrichment service', () => {
   test('does nothing when disabled', async () => {
     const semanticIndex = new SemanticIndex();
     const providers = createMockProviders();
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: false, // Disabled
       concurrency: 1,
@@ -219,14 +219,14 @@ suite('semantic enrichment service', () => {
 
   test('clear empties the queue', async () => {
     const semanticIndex = new SemanticIndex();
-    
+
     // Create slow providers to give us time to clear
     let providerStarted = false;
     let shouldResolve: (() => void) | null = null;
     const providerPromise = new Promise<void>((resolve) => {
       shouldResolve = resolve;
     });
-    
+
     const providers = {
       getDefinitions: async (uri: any, position: any): Promise<ProviderCallResult<SemanticTarget[]>> => {
         providerStarted = true;
@@ -249,7 +249,7 @@ suite('semantic enrichment service', () => {
         return { ok: true, value: undefined };
       }
     };
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,
@@ -280,17 +280,17 @@ suite('semantic enrichment service', () => {
     ];
 
     service.enqueueFile('test.ts', symbols, 1);
-    
+
     // Wait for provider to start
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.ok(providerStarted, 'Provider should have started');
-    
+
     // Clear the queue while first symbol is still processing
     service.clear();
-    
+
     // Let the provider complete
     shouldResolve!();
-    
+
     await service.idle();
 
     // First symbol may or may not be written (it was already processing)
@@ -303,7 +303,7 @@ suite('semantic enrichment service', () => {
   test('clear empties the queue and clears stored metadata from SemanticIndex', async () => {
     const semanticIndex = new SemanticIndex();
     const providers = createMockProviders();
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,
@@ -344,7 +344,7 @@ suite('semantic enrichment service', () => {
   test('clear clears cancelled generation tracking', async () => {
     const semanticIndex = new SemanticIndex();
     const providers = createMockProviders();
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,
@@ -368,22 +368,22 @@ suite('semantic enrichment service', () => {
     // Cancel generation 1 and 2
     service.cancelGeneration(1);
     service.cancelGeneration(2);
-    
+
     // Enqueue work for cancelled generation 1 - should be skipped
     service.enqueueFile('test.ts', symbols, 1);
     await service.idle();
-    
+
     const key = createSymbolSemanticKey(symbols[0]);
     const metadataBefore = semanticIndex.get('test.ts', key);
     assert.strictEqual(metadataBefore, undefined, 'Gen 1 should be cancelled, no metadata');
-    
+
     // Clear everything including cancelled generations
     service.clear();
-    
+
     // Now enqueue work for previously-cancelled generation 1 - should succeed after clear
     service.enqueueFile('test.ts', symbols, 1);
     await service.idle();
-    
+
     const metadataAfter = semanticIndex.get('test.ts', key);
     assert.ok(metadataAfter, 'Gen 1 should work after clear removes cancelled tracking');
     assert.strictEqual(metadataAfter.status, 'enriched');
@@ -392,7 +392,7 @@ suite('semantic enrichment service', () => {
   test('timeoutMs = 0 disables timeout and allows enrichment to complete', async () => {
     const semanticIndex = new SemanticIndex();
     let time = 1000;
-    
+
     // Create providers that take some time but will eventually complete
     let definitionsCallCount = 0;
     const providers = {
@@ -418,7 +418,7 @@ suite('semantic enrichment service', () => {
         return { ok: true, value: undefined };
       }
     };
-    
+
     const service = new SemanticEnrichmentService(semanticIndex, {
       enabled: true,
       concurrency: 1,

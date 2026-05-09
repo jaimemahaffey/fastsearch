@@ -77,7 +77,7 @@ suite('semantic enrichment index', () => {
     });
 
     const retrieved1 = index.get('src/alpha.ts', 'Alpha:5:7:class')!;
-    
+
     // Mutate retrieved nested objects
     retrieved1.definition!.line = 777;
     retrieved1.declaration!.uri = 'file:///mutated.ts';
@@ -99,7 +99,7 @@ suite('semantic enrichment index', () => {
     });
 
     const serialized = index.allByFile();
-    
+
     // Mutate serialized nested objects
     serialized[0]!.entries[0]!.metadata.definition!.column = 666;
     serialized[0]!.entries[0]!.metadata.typeDefinition!.line = 555;

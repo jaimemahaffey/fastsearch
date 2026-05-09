@@ -80,7 +80,7 @@ export class SemanticEnrichmentService {
     if (this.queue.length === 0 && this.activeWorkers === 0) {
       return;
     }
-    
+
     // Wait for work to complete by registering a resolver
     return new Promise<void>((resolve) => {
       this.idleResolvers.push(resolve);
@@ -131,13 +131,13 @@ export class SemanticEnrichmentService {
       this.drain();
     }
   }
-  
+
   private notifyIdle(): void {
     // Only resolve waiters if truly idle
     if (this.activeWorkers !== 0 || this.queue.length !== 0) {
       return;
     }
-    
+
     const resolvers = this.idleResolvers;
     this.idleResolvers = [];
     for (const resolve of resolvers) {
@@ -147,7 +147,7 @@ export class SemanticEnrichmentService {
 
   private async enrichSymbol(uri: vscode.Uri, position: vscode.Position): Promise<SemanticMetadata> {
     const timeoutMs = this.options.timeoutMs;
-    
+
     try {
       const result = await withTimeout(
         this.collectSemanticData(uri, position),
@@ -170,7 +170,7 @@ export class SemanticEnrichmentService {
           enrichedAt: this.options.now()
         };
       }
-      
+
       this.options.onError(`Provider failed for ${uri.toString()}: ${error}`);
       return {
         provider: 'vscode',
