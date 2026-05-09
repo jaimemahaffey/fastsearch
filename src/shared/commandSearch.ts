@@ -84,12 +84,13 @@ export function toTextSearchCandidate(match: TextMatch): CommandSearchCandidate 
   };
 }
 
-export function getSemanticSymbolDetail(uri: string, semanticMetadata?: SemanticMetadata): string {
+export function getSemanticSymbolDetail(rawUri: string, semanticMetadata?: SemanticMetadata): string {
+  const displayPath = getCommandSearchDisplayPath(rawUri);
   if (!semanticMetadata || semanticMetadata.status !== 'enriched') {
-    return uri;
+    return displayPath;
   }
 
-  const parts: string[] = [uri];
+  const parts: string[] = [displayPath];
 
   if (semanticMetadata.referenceCount !== undefined) {
     parts.push(`${semanticMetadata.referenceCount} refs`);
@@ -105,9 +106,7 @@ export function getSemanticSymbolDetail(uri: string, semanticMetadata?: Semantic
 }
 
 export function toSymbolSearchCandidate(symbol: SymbolRecord, semanticMetadata?: SemanticMetadata): CommandSearchCandidate {
-  const detail = semanticMetadata && semanticMetadata.status === 'enriched'
-    ? getSemanticSymbolDetail(getCommandSearchDisplayPath(symbol.uri), semanticMetadata)
-    : getCommandSearchDisplayPath(symbol.uri);
+  const detail = getSemanticSymbolDetail(symbol.uri, semanticMetadata);
   const candidate: CommandSearchCandidate = {
     source: 'symbol',
     label: symbol.name,
@@ -134,10 +133,10 @@ export function toDiscoverySearchCandidate(
   const displayPath = getCommandSearchDisplayPath(result.uri);
   return {
     source,
-    label: `${displayPath}:${result.line + 1}`,
+    label: `${result.uri}:${result.line + 1}`,
     description: undefined,
     detail: displayPath,
-    filterText: displayPath,
+    filterText: result.uri,
     uri: result.uri,
     line: result.line,
     approximate: result.approximate

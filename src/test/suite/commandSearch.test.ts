@@ -72,10 +72,10 @@ suite('commandSearch', () => {
     });
     assert.deepEqual(toDiscoverySearchCandidate('usage', discoveryResult), {
       source: 'usage',
-      label: `${displayPath}:15`,
+      label: `${fileRecord.uri}:15`,
       description: undefined,
       detail: displayPath,
-      filterText: displayPath,
+      filterText: fileRecord.uri,
       uri: fileRecord.uri,
       line: 14,
       approximate: true
@@ -208,7 +208,7 @@ suite('commandSearch', () => {
     assert.equal(detail, 'file:///workspace/src/app/main.ts • 7 refs • 3 impls • vscode');
   });
 
-  test('enriches symbol search candidates with semantic metadata', () => {
+  test('enriches symbol search candidates with semantic metadata and uses cleaned display path', () => {
     const symbolRecord: SymbolRecord = {
       name: 'AlphaService',
       kind: 5,
@@ -242,7 +242,44 @@ suite('commandSearch', () => {
     assert.equal(candidate.semanticConfidence, 1);
   });
 
-  test('preserves semanticConfidence from non-enriched metadata while falling back detail to raw URI', () => {
+  test('non-enriched semantic metadata keeps semanticConfidence and uses cleaned display path', () => {
+    const symbolRecord: SymbolRecord = {
+      name: 'BetaService',
+      kind: 5,
+      containerName: 'services',
+      uri: 'file:///workspace/src/app/service.ts',
+      startLine: 20,
+      startColumn: 4,
+      approximate: false
+    };
+    const semanticMetadata: SemanticMetadata = {
+      definition: { uri: 'file:///workspace/src/app/service.ts', line: 20, column: 4 },
+      implementationCount: undefined,
+      referenceCount: undefined,
+      provider: 'vscode',
+      status: 'pending',
+      confidence: 0.8,
+      enrichedAt: 456
+    };
+
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse(symbolRecord.uri).fsPath;
+    const candidate = toSymbolSearchCandidate(symbolRecord, semanticMetadata);
+
+    assert.equal(candidate.detail, displayPath);
+    assert.equal(candidate.semanticConfidence, 0.8);
+  });
+
+  test('getCommandSearchDisplayPath leaves non-file URIs unchanged', () => {
+    const nonFileUri = 'git:/workspace/src/app/main.ts';
+    const { getCommandSearchDisplayPath } = require('../../shared/commandSearch');
+    assert.equal(getCommandSearchDisplayPath(nonFileUri), nonFileUri);
+  });
+
+  // Removed: duplicate/contradictory test for non-enriched semantic detail (see above for correct behavior)
+  // test('preserves semanticConfidence from non-enriched metadata while falling back detail to raw URI', () => {
+  //   ...
+  // });
     const symbolRecord: SymbolRecord = {
       name: 'BetaService',
       kind: 5,
