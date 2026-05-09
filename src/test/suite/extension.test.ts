@@ -340,7 +340,7 @@ suite('extension activation', () => {
       assert.equal(outcome, 'resolved');
       assert.equal(quickPickItems.length, 1);
       assert.equal(quickPickItems[0]?.label, 'MainService');
-      assert.equal(quickPickItems[0]?.detail, `${indexedFile.toString()} • 6 refs • 2 impls • vscode`);
+      assert.equal(quickPickItems[0]?.detail, `${indexedFile.fsPath} • 6 refs • 2 impls • vscode`);
     } finally {
       resolveFindFiles?.([]);
       await goToSymbolCommandPromise;
