@@ -17,6 +17,10 @@ export type SemanticProviders = {
 export type SemanticEnrichmentServiceOptions = {
   enabled: boolean;
   concurrency: number;
+  /**
+   * Timeout in milliseconds for provider calls. Set to 0 or negative to disable timeout.
+   * WARNING: Disabling timeout may cause `idle()` to wait indefinitely if providers never resolve.
+   */
   timeoutMs: number;
   providers: SemanticProviders;
   now?: () => number;
@@ -123,17 +127,17 @@ export class SemanticEnrichmentService {
       this.options.onError(`Error enriching symbol ${item.symbol.name}: ${error}`);
     } finally {
       this.activeWorkers--;
-      
-      // Notify idle waiters when work is complete
-      if (this.activeWorkers === 0 && this.queue.length === 0) {
-        this.notifyIdle();
-      }
-      
+      this.notifyIdle();
       this.drain();
     }
   }
   
   private notifyIdle(): void {
+    // Only resolve waiters if truly idle
+    if (this.activeWorkers !== 0 || this.queue.length !== 0) {
+      return;
+    }
+    
     const resolvers = this.idleResolvers;
     this.idleResolvers = [];
     for (const resolve of resolvers) {
