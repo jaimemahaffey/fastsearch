@@ -396,13 +396,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await waitForInitialSnapshotRestore();
-
-    if (blockingBuildInProgress && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
-    }
-
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('symbol', INITIAL_SYMBOL_LAYER_WARMING_MESSAGE)) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
