@@ -393,6 +393,114 @@ suite('extension activation', () => {
     }
   });
 
+  test('runs symbol indexing with bounded concurrency after the file layer is available', async () => {
+    const workspaceUri = vscode.Uri.file('c:\\workspace');
+    const files = [
+      vscode.Uri.parse('file:///workspace/task4/alpha.ts'),
+      vscode.Uri.parse('file:///workspace/task4/beta.ts'),
+      vscode.Uri.parse('file:///workspace/task4/gamma.ts')
+    ];
+    const trackedUris = new Set(files.map((file) => file.toString()));
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    const originalWorkspaceFs = vscode.workspace.fs;
+    let activeSymbolCalls = 0;
+    let maxActiveSymbolCalls = 0;
+    let releaseSymbolCallGate: (() => void) | undefined;
+    const symbolCallGate = new Promise<void>((resolve) => {
+      releaseSymbolCallGate = resolve;
+    });
+
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => registeredCommands.delete(command));
+    }) as typeof vscode.commands.registerCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => files) as typeof vscode.workspace.findFiles);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((value: string | vscode.Uri) =>
+      typeof value === 'string' ? value : value.path.replace('/workspace/', '')
+    ) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', (((_uri: vscode.Uri) => ({
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    })) as unknown) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+    const fsPatch = patchProperty(vscode.workspace, 'fs', {
+      ...originalWorkspaceFs,
+      stat: async () => ({
+        type: vscode.FileType.File,
+        ctime: 0,
+        mtime: 0,
+        size: 64
+      }),
+      readFile: async () => Uint8Array.from(Buffer.from('export const value = 1;'))
+    } as typeof vscode.workspace.fs);
+    const executePatch = patchProperty(vscode.commands, 'executeCommand', (async (command: string, target?: vscode.Uri) => {
+      if (command === 'vscode.executeDocumentSymbolProvider' && target && trackedUris.has(target.toString())) {
+        activeSymbolCalls += 1;
+        maxActiveSymbolCalls = Math.max(maxActiveSymbolCalls, activeSymbolCalls);
+        await symbolCallGate;
+        activeSymbolCalls -= 1;
+        return [];
+      }
+      return [];
+    }) as typeof vscode.commands.executeCommand);
+
+    try {
+      activate({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+      await waitFor(() => maxActiveSymbolCalls >= 2, 'symbol phase bounded concurrency');
+    } finally {
+      releaseSymbolCallGate?.();
+      restoreProperty(executePatch);
+      restoreProperty(fsPatch);
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(configPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(registerPatch);
+    }
+
+    assert.equal(maxActiveSymbolCalls <= 4, true);
+  });
+
   test('restores a file-only snapshot and keeps symbol search blocked until the symbol layer completes', async () => {
     const workspaceUri = vscode.Uri.file('c:\\workspace');
     const indexedFile = vscode.Uri.parse('file:///workspace/src/app/main.ts');

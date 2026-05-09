@@ -11,6 +11,7 @@ import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
 import { createLayerAvailability, hasLayer, markLayerActive, markLayerAvailable, toPersistedLayerState } from './core/indexLayerState';
+import { runPhaseJobs } from './core/indexPhaseRunner';
 import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
@@ -32,6 +33,8 @@ const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
 const INDEX_BUILD_STATUS_PRIORITY = 100;
 const PERSISTENCE_SCHEMA_VERSION = 2;
+const TEXT_PHASE_CONCURRENCY = 8;
+const SYMBOL_PHASE_CONCURRENCY = 4;
 
 type IndexBuildKind = 'initial' | 'rebuild';
 
@@ -677,11 +680,18 @@ async function buildWorkspaceIndexes(
     await yieldToEventLoop();
 
     let textPhaseProcessed = skippedFiles;
-    for (const candidate of candidates) {
+    let stopTextPhase = false;
+    await runPhaseJobs(candidates, TEXT_PHASE_CONCURRENCY, async (candidate) => {
+      if (stopTextPhase || !shouldContinue()) {
+        stopTextPhase = true;
+        return;
+      }
+
       try {
         const content = await readEligibleTextContent(vscode.workspace.fs, candidate.uri, candidate.relativePath, config.maxFileSizeKb);
         if (!shouldContinue()) {
-          return false;
+          stopTextPhase = true;
+          return;
         }
 
         if (content !== undefined) {
@@ -704,6 +714,10 @@ async function buildWorkspaceIndexes(
       if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, textPhaseProcessed - skippedFiles)) {
         await yieldToEventLoop();
       }
+    });
+
+    if (stopTextPhase || !shouldContinue()) {
+      return false;
     }
 
     await markLayerReady('text', 'symbol');
@@ -716,13 +730,20 @@ async function buildWorkspaceIndexes(
     });
 
     let symbolPhaseProcessed = skippedFiles;
-    for (const candidate of candidates) {
+    let stopSymbolPhase = false;
+    await runPhaseJobs(candidates, SYMBOL_PHASE_CONCURRENCY, async (candidate) => {
+      if (stopSymbolPhase || !shouldContinue()) {
+        stopSymbolPhase = true;
+        return;
+      }
+
       const { uri, relativePath } = candidate;
 
       try {
         const symbolResult = await getDocumentSymbolsForBuild(uri, config.symbolProviderTimeoutMs);
         if (!shouldContinue()) {
-          return false;
+          stopSymbolPhase = true;
+          return;
         }
 
         if (symbolResult.timedOut) {
@@ -749,6 +770,10 @@ async function buildWorkspaceIndexes(
       if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, symbolPhaseProcessed - skippedFiles)) {
         await yieldToEventLoop();
       }
+    });
+
+    if (stopSymbolPhase || !shouldContinue()) {
+      return false;
     }
 
     await markLayerReady('symbol');
