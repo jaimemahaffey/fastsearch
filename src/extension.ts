@@ -10,6 +10,7 @@ import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
+import { createLayerAvailability, hasLayer, markLayerActive, markLayerAvailable } from './core/indexLayerState';
 import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
@@ -20,9 +21,12 @@ import { SemanticEnrichmentService } from './semantics/semanticEnrichmentService
 import { SemanticIndex } from './semantics/semanticIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 import type { FastIndexerConfig } from './configuration';
-import type { WorkspacePersistence } from './shared/types';
+import type { IndexLayer, WorkspacePersistence } from './shared/types';
 
 const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a moment.';
+const INITIAL_FILE_LAYER_WARMING_MESSAGE = 'Building initial file index. Please wait a moment.';
+const INITIAL_TEXT_LAYER_WARMING_MESSAGE = 'Building initial text index. Please wait a moment.';
+const INITIAL_SYMBOL_LAYER_WARMING_MESSAGE = 'Building initial symbol index. Please wait a moment.';
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
 const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
@@ -34,6 +38,7 @@ type IndexBuildKind = 'initial' | 'rebuild';
 type IndexBuildProgress = {
   phase: 'discovering' | 'indexing';
   kind: IndexBuildKind;
+  currentLayer?: IndexLayer;
   processedFiles: number;
   totalFiles?: number;
   skippedFiles: number;
@@ -47,7 +52,7 @@ type IndexBuildStatusReporter = {
   setTotalFiles: (token: number, totalFiles: number) => void;
   advance: (
     token: number,
-    update: Pick<IndexBuildProgress, 'processedFiles' | 'skippedFiles' | 'symbolTimeouts' | 'currentFile'>
+    update: Pick<IndexBuildProgress, 'processedFiles' | 'skippedFiles' | 'symbolTimeouts' | 'currentFile' | 'currentLayer'>
   ) => void;
   finish: (token: number) => void;
 };
@@ -107,7 +112,12 @@ export function activate(context: vscode.ExtensionContext): void {
         output,
         () => getConfig().enabled && generation === buildGeneration,
         buildStatus,
-        progressToken
+        progressToken,
+        (layer) => {
+          layerAvailability = markLayerAvailable(layerAvailability, layer);
+          resolveLayerWaiters(layer);
+        },
+        persistLayerCheckpoint
       );
 
       if (completed !== false && getConfig().enabled) {
@@ -145,6 +155,26 @@ export function activate(context: vscode.ExtensionContext): void {
   let initialBuildToken = 0;
   let activeBuildProgressToken = 0;
   let currentBuildKind: IndexBuildKind = 'initial';
+  let layerAvailability = createLayerAvailability();
+  const layerWaiters = new Map<IndexLayer, Array<() => void>>();
+
+  const resolveLayerWaiters = (layer: IndexLayer): void => {
+    const waiters = layerWaiters.get(layer) ?? [];
+    layerWaiters.delete(layer);
+    waiters.forEach((resolve) => resolve());
+  };
+
+  const resolveAllLayerWaiters = (): void => {
+    for (const layer of layerWaiters.keys()) {
+      resolveLayerWaiters(layer);
+    }
+  };
+
+  const persistLayerCheckpoint = async (nextLayer?: IndexLayer): Promise<void> => {
+    if (nextLayer) {
+      layerAvailability = markLayerActive(layerAvailability, nextLayer);
+    }
+  };
 
   const runQueuedRebuild = (): void => {
     if (initialFileIndexBuildPending || rebuildInFlight) {
@@ -234,6 +264,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         initialFileIndexBuildPending = false;
+        resolveAllLayerWaiters();
         if (rebuildQueued) {
           runQueuedRebuild();
         }
@@ -244,6 +275,7 @@ export function activate(context: vscode.ExtensionContext): void {
     currentBuildKind = 'initial';
     coordinator.markWarming();
     restoredSnapshotReady = false;
+    layerAvailability = createLayerAvailability();
     initialSnapshotRestorePending = true;
     initialSnapshotPromise = restorePersistedSnapshot(
       persistenceStore,
@@ -257,6 +289,9 @@ export function activate(context: vscode.ExtensionContext): void {
     )
       .then((restored) => {
         restoredSnapshotReady = restored;
+        layerAvailability = restored
+          ? createLayerAvailability(['file', 'text', 'symbol', 'semantic'])
+          : createLayerAvailability();
       })
       .catch((error) => {
         restoredSnapshotReady = false;
@@ -270,6 +305,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const startConfigRebuild = (): void => {
     currentBuildKind = 'rebuild';
+    layerAvailability = createLayerAvailability();
     if (rebuildTimeout) {
       clearTimeout(rebuildTimeout);
       rebuildTimeout = undefined;
@@ -303,6 +339,28 @@ export function activate(context: vscode.ExtensionContext): void {
     if (initialSnapshotRestorePending) {
       await initialSnapshotPromise;
     }
+  };
+
+  const waitForLayer = async (layer: IndexLayer, warmingMessage: string): Promise<boolean> => {
+    await waitForInitialSnapshotRestore();
+
+    if (hasLayer(layerAvailability, layer)) {
+      return getConfig().enabled;
+    }
+
+    if (initialFileIndexBuildPending) {
+      void vscode.window.showInformationMessage(warmingMessage);
+    }
+
+    while (!hasLayer(layerAvailability, layer) && initialFileIndexBuildPending) {
+      await new Promise<void>((resolve) => {
+        const waiters = layerWaiters.get(layer) ?? [];
+        waiters.push(resolve);
+        layerWaiters.set(layer, waiters);
+      });
+    }
+
+    return getConfig().enabled && hasLayer(layerAvailability, layer);
   };
 
   if (config.enabled) {
@@ -348,13 +406,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await waitForInitialSnapshotRestore();
-
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
-    }
-
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('file', INITIAL_FILE_LAYER_WARMING_MESSAGE)) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -369,13 +421,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await waitForInitialSnapshotRestore();
-
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
-    }
-
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('text', INITIAL_TEXT_LAYER_WARMING_MESSAGE)) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -390,13 +436,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await waitForInitialSnapshotRestore();
-
-    if (initialFileIndexBuildPending && !restoredSnapshotReady) {
-      void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
-    }
-
-    if (!restoredSnapshotReady && !await waitForCurrentBuild()) {
+    if (!await waitForLayer('symbol', INITIAL_SYMBOL_LAYER_WARMING_MESSAGE)) {
       void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
       return;
     }
@@ -523,6 +563,8 @@ export function activate(context: vscode.ExtensionContext): void {
           semanticIndex.clear();
           coordinator.markStale();
           initialFileIndexBuildPending = false;
+          layerAvailability = createLayerAvailability();
+          resolveAllLayerWaiters();
           output.appendLine('Background indexing disabled by configuration.');
           return;
         }
@@ -560,10 +602,16 @@ async function buildWorkspaceIndexes(
   output: vscode.OutputChannel,
   shouldContinue: () => boolean,
   buildStatus: IndexBuildStatusReporter,
-  progressToken: number
+  progressToken: number,
+  markLayerReady: (layer: IndexLayer) => void,
+  persistLayerCheckpoint: (nextLayer?: IndexLayer) => Promise<void>
 ): Promise<boolean> {
   try {
     if (config.include.length === 0) {
+      markLayerReady('file');
+      markLayerReady('text');
+      markLayerReady('symbol');
+      await persistLayerCheckpoint('semantic');
       return true;
     }
 
@@ -572,35 +620,106 @@ async function buildWorkspaceIndexes(
       toGlobExpression([WORKSPACE_FILE_EXCLUDE_GLOB, ...config.exclude], WORKSPACE_FILE_EXCLUDE_GLOB)
     );
 
-    let processedFiles = 0;
-    let skippedFiles = 0;
+    const candidates = files
+      .map((file) => ({
+        uri: file,
+        relativePath: vscode.workspace.asRelativePath(file, true)
+      }))
+      .filter((candidate) => !ignoreMatcher.ignores(candidate.uri.fsPath, candidate.relativePath));
+
+    const skippedFiles = files.length - candidates.length;
     let symbolTimeouts = 0;
     buildStatus.setTotalFiles(progressToken, files.length);
-    for (const file of files) {
+    buildStatus.advance(progressToken, {
+      processedFiles: skippedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: undefined,
+      currentLayer: 'file'
+    });
+
+    let filePhaseProcessed = skippedFiles;
+    for (const candidate of candidates) {
       if (!shouldContinue()) {
         return false;
       }
 
-      const relativePath = vscode.workspace.asRelativePath(file, true);
-      if (ignoreMatcher.ignores(file.fsPath, relativePath)) {
-        processedFiles += 1;
-        skippedFiles += 1;
-        buildStatus.advance(progressToken, {
-          processedFiles,
-          skippedFiles,
-          symbolTimeouts,
-          currentFile: relativePath
-        });
-        if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
-          await yieldToEventLoop();
+      fileIndex.upsert(
+        candidate.relativePath,
+        candidate.uri.toString(),
+        toIndexedFileKey(candidate.uri, candidate.relativePath)
+      );
+
+      filePhaseProcessed += 1;
+      buildStatus.advance(progressToken, {
+        processedFiles: filePhaseProcessed,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: candidate.relativePath,
+        currentLayer: 'file'
+      });
+      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, filePhaseProcessed - skippedFiles)) {
+        await yieldToEventLoop();
+      }
+    }
+
+    markLayerReady('file');
+    await persistLayerCheckpoint('text');
+    buildStatus.advance(progressToken, {
+      processedFiles: skippedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: undefined,
+      currentLayer: 'text'
+    });
+    await yieldToEventLoop();
+
+    let textPhaseProcessed = skippedFiles;
+    for (const candidate of candidates) {
+      try {
+        const content = await readEligibleTextContent(vscode.workspace.fs, candidate.uri, candidate.relativePath, config.maxFileSizeKb);
+        if (!shouldContinue()) {
+          return false;
         }
-        continue;
+
+        if (content !== undefined) {
+          textIndex.upsert(candidate.relativePath, candidate.uri.toString(), content);
+        }
+      } catch (error) {
+        output.appendLine(
+          `Failed to read ${candidate.relativePath} for text indexing: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
 
-      fileIndex.upsert(relativePath, file.toString(), toIndexedFileKey(file, relativePath));
+      textPhaseProcessed += 1;
+      buildStatus.advance(progressToken, {
+        processedFiles: textPhaseProcessed,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: candidate.relativePath,
+        currentLayer: 'text'
+      });
+      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, textPhaseProcessed - skippedFiles)) {
+        await yieldToEventLoop();
+      }
+    }
+
+    markLayerReady('text');
+    await persistLayerCheckpoint('symbol');
+    buildStatus.advance(progressToken, {
+      processedFiles: skippedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: undefined,
+      currentLayer: 'symbol'
+    });
+
+    let symbolPhaseProcessed = skippedFiles;
+    for (const candidate of candidates) {
+      const { uri, relativePath } = candidate;
 
       try {
-        const symbolResult = await getDocumentSymbolsForBuild(file, config.symbolProviderTimeoutMs);
+        const symbolResult = await getDocumentSymbolsForBuild(uri, config.symbolProviderTimeoutMs);
         if (!shouldContinue()) {
           return false;
         }
@@ -618,30 +737,21 @@ async function buildWorkspaceIndexes(
         output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
       }
 
-      try {
-        const content = await readEligibleTextContent(vscode.workspace.fs, file, relativePath, config.maxFileSizeKb);
-        if (!shouldContinue()) {
-          return false;
-        }
-
-        if (content !== undefined) {
-          textIndex.upsert(relativePath, file.toString(), content);
-        }
-      } catch (error) {
-        output.appendLine(`Failed to read ${relativePath} for text indexing: ${error instanceof Error ? error.message : String(error)}`);
-      }
-
-      processedFiles += 1;
+      symbolPhaseProcessed += 1;
       buildStatus.advance(progressToken, {
-        processedFiles,
+        processedFiles: symbolPhaseProcessed,
         skippedFiles,
         symbolTimeouts,
-        currentFile: relativePath
+        currentFile: relativePath,
+        currentLayer: 'symbol'
       });
-      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
+      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, symbolPhaseProcessed - skippedFiles)) {
         await yieldToEventLoop();
       }
     }
+
+    markLayerReady('symbol');
+    await persistLayerCheckpoint('semantic');
 
     return true;
   } catch (error) {
@@ -836,7 +946,7 @@ function createIndexBuildStatusReporter(statusItem: vscode.StatusBarItem): Index
     const action = state.kind === 'rebuild' ? 'rebuilding' : 'indexing';
     statusItem.text = state.phase === 'discovering'
       ? '$(sync~spin) Fast Indexer: scanning workspace...'
-      : `$(sync~spin) Fast Indexer: ${action} ${state.processedFiles}/${state.totalFiles ?? 0}`;
+      : `$(sync~spin) Fast Indexer: ${action}${state.currentLayer ? ` ${state.currentLayer}` : ''} ${state.processedFiles}/${state.totalFiles ?? 0}`;
     statusItem.tooltip = createIndexBuildTooltip(state);
     statusItem.show();
   };
@@ -903,6 +1013,10 @@ function createIndexBuildTooltip(state: IndexBuildProgress): string {
 
   if (state.currentFile) {
     lines.unshift(`Current file: ${state.currentFile}`);
+  }
+
+  if (state.currentLayer) {
+    lines.unshift(`Layer: ${state.currentLayer}`);
   }
 
   return lines.join('\n');
