@@ -17,6 +17,7 @@ export type FastIndexerConfig = {
   semanticEnrichment: boolean;
   semanticConcurrency: number;
   semanticTimeoutMs: number;
+  symbolProviderTimeoutMs: number;
 };
 
 const REBUILD_KEYS = new Set([
@@ -27,7 +28,8 @@ const REBUILD_KEYS = new Set([
   'fastIndexer.maxFileSizeKb',
   'fastIndexer.semanticEnrichment',
   'fastIndexer.semanticConcurrency',
-  'fastIndexer.semanticTimeoutMs'
+  'fastIndexer.semanticTimeoutMs',
+  'fastIndexer.symbolProviderTimeoutMs'
 ]);
 
 const DEFAULT_INCLUDE = ['**/*'];
@@ -53,7 +55,8 @@ export function readConfig(): FastIndexerConfig {
     useFzf: config.get<boolean>('useFzf', false),
     semanticEnrichment: config.get<boolean>('semanticEnrichment', true),
     semanticConcurrency: Math.max(1, config.get<number>('semanticConcurrency', 2)),
-    semanticTimeoutMs: Math.max(0, config.get<number>('semanticTimeoutMs', 750))
+    semanticTimeoutMs: Math.max(0, config.get<number>('semanticTimeoutMs', 750)),
+    symbolProviderTimeoutMs: Math.max(0, config.get<number>('symbolProviderTimeoutMs', 3000))
   };
 }
 
