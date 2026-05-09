@@ -145,6 +145,59 @@ suite('discoveryCommands', () => {
     ]);
   });
 
+  test('findImplementations keeps provider results ahead of enriched fallback symbols', async () => {
+    const symbolIndex = new SymbolIndex();
+    const contractUri = vscode.Uri.file('c:\\workspace\\src\\contract.ts');
+    const providerUri = vscode.Uri.file('c:\\workspace\\src\\provider-impl.ts');
+    const fallbackUri = vscode.Uri.file('c:\\workspace\\src\\fallback-impl.ts');
+    symbolIndex.replaceForFile('src/fallback-impl.ts', [{
+      name: 'alphaImplementation',
+      kind: vscode.SymbolKind.Class,
+      uri: fallbackUri.toString(),
+      startLine: 10,
+      startColumn: 0,
+      approximate: false
+    }]);
+
+    let awaitedFallback = false;
+    let pickedItems: QuickPickItem[] | undefined;
+    const patches = createCommandPatches({
+      activeEditor: createEditor('alpha', contractUri),
+      executeCommand: async (command) => {
+        if (command === 'vscode.executeImplementationProvider') {
+          return [new vscode.Location(providerUri, new vscode.Range(4, 0, 4, 5))];
+        }
+
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      asRelativePath: (resource) =>
+        isUriMatch(resource, providerUri) ? 'src/provider-impl.ts' : 'src/fallback-impl.ts',
+      showQuickPick: async (items) => {
+        pickedItems = items.map((item) => ({
+          label: item.label,
+          description: item.description,
+          detail: item.detail,
+          iconPath: item.iconPath as vscode.ThemeIcon | undefined
+        }));
+        return undefined;
+      }
+    });
+
+    try {
+      await findImplementations(symbolIndex, {
+        awaitFallbackReady: async () => {
+          awaitedFallback = true;
+        }
+      });
+    } finally {
+      restorePatches(patches);
+    }
+
+    assert.equal(awaitedFallback, false);
+    assert.deepEqual(pickedItems?.map((item) => item.label), ['src/provider-impl.ts:5']);
+    assert.equal((pickedItems?.[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'circle-filled');
+  });
+
   test('findImplementations presents LocationLink provider results without falling back', async () => {
     const symbolIndex = new SymbolIndex();
     const editorUri = vscode.Uri.file('c:\\workspace\\src\\contract.ts');
