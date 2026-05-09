@@ -36,6 +36,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const symbolIndex = new SymbolIndex();
   const textIndex = new TextIndex();
   const semanticIndex = new SemanticIndex();
+  let semanticService = createSemanticService(semanticIndex, config, output);
   const persistenceStore = new PersistenceStore(context.globalStorageUri?.fsPath ?? context.storageUri?.fsPath ?? '.fast-indexer-cache');
   const workspacePersistence = getWorkspacePersistence();
   let activeIgnoreMatcher: IgnoreMatcher = createIgnoreMatcher({
@@ -68,6 +69,8 @@ export function activate(context: vscode.ExtensionContext): void {
       fileIndex,
       symbolIndex,
       textIndex,
+      semanticService,
+      generation,
       currentConfig,
       ignoreMatcher,
       output,
@@ -85,6 +88,8 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   const coordinator = new IndexCoordinator({
     clearIndexes: () => {
+      semanticService.cancelGeneration(buildGeneration);
+      semanticService.clear();
       fileIndex.clear();
       symbolIndex.clear();
       textIndex.clear();
@@ -230,7 +235,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     rebuildQueued = false;
+    semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
+    semanticService = createSemanticService(semanticIndex, getConfig(), output);
     coordinator.markStale();
     beginBuildGate(() => coordinator.rebuild());
   };
@@ -464,7 +471,9 @@ export function activate(context: vscode.ExtensionContext): void {
           }
 
           initialBuildToken += 1;
+          semanticService.cancelGeneration(buildGeneration);
           buildGeneration += 1;
+          semanticService.clear();
           rebuildQueued = false;
           rebuildInFlight = false;
           fileIndex.clear();
@@ -494,6 +503,8 @@ async function buildWorkspaceIndexes(
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
+  semanticService: SemanticEnrichmentService,
+  generation: number,
   config: FastIndexerConfig,
   ignoreMatcher: IgnoreMatcher,
   output: vscode.OutputChannel,
@@ -533,6 +544,7 @@ async function buildWorkspaceIndexes(
         }
 
         symbolIndex.replaceForFile(relativePath, symbols);
+        semanticService.enqueueFile(relativePath, symbols, generation);
       } catch (error) {
         output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -751,6 +763,27 @@ function getWatcherFilters(config: FastIndexerConfig, ignoreMatcher: IgnoreMatch
     exclude: config.exclude,
     ignoreMatcher
   };
+}
+
+function createSemanticService(
+  semanticIndex: SemanticIndex,
+  config: FastIndexerConfig,
+  output: vscode.OutputChannel
+): SemanticEnrichmentService {
+  return new SemanticEnrichmentService(semanticIndex, {
+    enabled: config.semanticEnrichment,
+    concurrency: config.semanticConcurrency,
+    timeoutMs: config.semanticTimeoutMs,
+    providers: {
+      getDefinitions,
+      getDeclarations,
+      getTypeDefinitions,
+      getImplementations: getImplementationsAt,
+      getReferences: getReferencesAt,
+      getHoverSummary
+    },
+    onError: (message) => output.appendLine(message)
+  });
 }
 
 function normalizeWorkspaceFilePath(filePath: string): string {
