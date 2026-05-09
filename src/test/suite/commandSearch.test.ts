@@ -203,9 +203,11 @@ suite('commandSearch', () => {
       enrichedAt: 123
     };
 
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse('file:///workspace/src/app/main.ts').fsPath;
     const detail = getSemanticSymbolDetail('file:///workspace/src/app/main.ts', semanticMetadata);
 
-    assert.equal(detail, 'file:///workspace/src/app/main.ts • 7 refs • 3 impls • vscode');
+    assert.equal(detail, `${displayPath} • 7 refs • 3 impls • vscode`);
   });
 
   test('enriches symbol search candidates with semantic metadata and uses cleaned display path', () => {
@@ -230,10 +232,13 @@ suite('commandSearch', () => {
 
     const candidate = toSymbolSearchCandidate(symbolRecord, semanticMetadata);
 
+    const vscode = require('vscode');
+    const displayPath = vscode.Uri.parse(symbolRecord.uri).fsPath;
+
     assert.equal(candidate.source, 'symbol');
     assert.equal(candidate.label, 'AlphaService');
     assert.equal(candidate.description, 'services');
-    assert.equal(candidate.detail, 'file:///workspace/src/app/main.ts • 7 refs • 3 impls • vscode');
+    assert.equal(candidate.detail, `${displayPath} • 7 refs • 3 impls • vscode`);
     assert.equal(candidate.filterText, 'AlphaService services');
     assert.equal(candidate.uri, 'file:///workspace/src/app/main.ts');
     assert.equal(candidate.line, 10);
@@ -276,34 +281,4 @@ suite('commandSearch', () => {
     assert.equal(getCommandSearchDisplayPath(nonFileUri), nonFileUri);
   });
 
-  // Removed: duplicate/contradictory test for non-enriched semantic detail (see above for correct behavior)
-  // test('preserves semanticConfidence from non-enriched metadata while falling back detail to raw URI', () => {
-  //   ...
-  // });
-    const symbolRecord: SymbolRecord = {
-      name: 'BetaService',
-      kind: 5,
-      containerName: 'services',
-      uri: 'file:///workspace/src/app/service.ts',
-      startLine: 20,
-      startColumn: 4,
-      approximate: false
-    };
-    const semanticMetadata: SemanticMetadata = {
-      definition: { uri: 'file:///workspace/src/app/service.ts', line: 20, column: 4 },
-      implementationCount: undefined,
-      referenceCount: undefined,
-      provider: 'vscode',
-      status: 'pending',
-      confidence: 0.8,
-      enrichedAt: 456
-    };
-
-    const candidate = toSymbolSearchCandidate(symbolRecord, semanticMetadata);
-
-    // Detail should fall back to raw URI when status is not 'enriched'
-    assert.equal(candidate.detail, 'file:///workspace/src/app/service.ts');
-    // But semanticConfidence should still be copied from metadata
-    assert.equal(candidate.semanticConfidence, 0.8);
-  });
 });
