@@ -239,4 +239,32 @@ suite('commandSearch', () => {
     assert.equal(candidate.approximate, false);
     assert.equal(candidate.semanticConfidence, 1);
   });
+
+  test('preserves semanticConfidence from non-enriched metadata while falling back detail to raw URI', () => {
+    const symbolRecord: SymbolRecord = {
+      name: 'BetaService',
+      kind: 5,
+      containerName: 'services',
+      uri: 'file:///workspace/src/app/service.ts',
+      startLine: 20,
+      startColumn: 4,
+      approximate: false
+    };
+    const semanticMetadata: SemanticMetadata = {
+      definition: { uri: 'file:///workspace/src/app/service.ts', line: 20, column: 4 },
+      implementationCount: undefined,
+      referenceCount: undefined,
+      provider: 'vscode',
+      status: 'pending',
+      confidence: 0.8,
+      enrichedAt: 456
+    };
+
+    const candidate = toSymbolSearchCandidate(symbolRecord, semanticMetadata);
+
+    // Detail should fall back to raw URI when status is not 'enriched'
+    assert.equal(candidate.detail, 'file:///workspace/src/app/service.ts');
+    // But semanticConfidence should still be copied from metadata
+    assert.equal(candidate.semanticConfidence, 0.8);
+  });
 });

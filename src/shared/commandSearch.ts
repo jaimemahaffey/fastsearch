@@ -113,7 +113,7 @@ export function toSymbolSearchCandidate(symbol: SymbolRecord, semanticMetadata?:
     approximate: symbol.approximate
   };
 
-  if (semanticMetadata && semanticMetadata.status === 'enriched') {
+  if (semanticMetadata) {
     candidate.semanticConfidence = semanticMetadata.confidence;
   }
 
