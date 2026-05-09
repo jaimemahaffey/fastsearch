@@ -395,10 +395,14 @@ suite('extension activation', () => {
 
   test('runs symbol indexing with bounded concurrency after the file layer is available', async () => {
     const workspaceUri = vscode.Uri.file('c:\\workspace');
+    const expectedSymbolConcurrency = 4;
     const files = [
       vscode.Uri.parse('file:///workspace/task4/alpha.ts'),
       vscode.Uri.parse('file:///workspace/task4/beta.ts'),
-      vscode.Uri.parse('file:///workspace/task4/gamma.ts')
+      vscode.Uri.parse('file:///workspace/task4/gamma.ts'),
+      vscode.Uri.parse('file:///workspace/task4/delta.ts'),
+      vscode.Uri.parse('file:///workspace/task4/epsilon.ts'),
+      vscode.Uri.parse('file:///workspace/task4/zeta.ts')
     ];
     const trackedUris = new Set(files.map((file) => file.toString()));
     const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
@@ -481,7 +485,9 @@ suite('extension activation', () => {
 
     try {
       activate({ subscriptions: [] } as unknown as vscode.ExtensionContext);
-      await waitFor(() => maxActiveSymbolCalls >= 2, 'symbol phase bounded concurrency');
+      await waitFor(() => maxActiveSymbolCalls >= expectedSymbolConcurrency, 'symbol phase bounded concurrency');
+      assert.equal(activeSymbolCalls, expectedSymbolConcurrency);
+      assert.equal(maxActiveSymbolCalls, expectedSymbolConcurrency);
     } finally {
       releaseSymbolCallGate?.();
       restoreProperty(executePatch);
@@ -498,7 +504,7 @@ suite('extension activation', () => {
       restoreProperty(registerPatch);
     }
 
-    assert.equal(maxActiveSymbolCalls <= 4, true);
+    assert.equal(maxActiveSymbolCalls, expectedSymbolConcurrency);
   });
 
   test('restores a file-only snapshot and keeps symbol search blocked until the symbol layer completes', async () => {
