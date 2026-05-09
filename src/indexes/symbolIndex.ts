@@ -36,20 +36,14 @@ export class SymbolIndex {
     this.byFile.delete(relativePath);
   }
 
-  moveFile(fromRelativePath: string, toRelativePath: string, toUri: string): void {
+  moveFile(fromRelativePath: string, toRelativePath: string): void {
     const existing = this.byFile.get(fromRelativePath);
     if (!existing) {
       return;
     }
 
     this.byFile.delete(fromRelativePath);
-    this.byFile.set(
-      toRelativePath,
-      existing.map((symbol) => ({
-        ...symbol,
-        uri: toUri
-      }))
-    );
+    this.byFile.set(toRelativePath, existing);
   }
 
   replaceForFile(relativePath: string, symbols: SymbolRecord[]): void {
