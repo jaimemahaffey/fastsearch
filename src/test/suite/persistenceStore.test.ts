@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { PersistenceStore } from '../../core/persistenceStore';
+import { PersistenceStore, type PersistedWorkspaceSnapshot } from '../../core/persistenceStore';
 import type { FileRecord } from '../../shared/types';
 import type { SymbolRecord } from '../../indexes/symbolIndex';
 
@@ -101,6 +101,38 @@ suite('PersistenceStore', () => {
       assert.equal(restored, undefined);
     } finally {
       await fs.rm(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  test('writes and reads available layer metadata with the workspace snapshot', async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'fast-indexer-persist-'));
+    const store = new PersistenceStore(tempRoot);
+
+    const snapshot: PersistedWorkspaceSnapshot = {
+      metadata: {
+        schemaVersion: 2,
+        workspaceId: 'workspace-id',
+        configHash: 'config-hash',
+        layerState: {
+          availableLayers: ['file', 'text'],
+          activeLayer: 'symbol'
+        }
+      },
+      fileIndex: [],
+      textIndex: [],
+      symbolIndex: []
+    };
+
+    try {
+      await store.writeWorkspaceSnapshot('workspace-id', snapshot);
+      const restored = await store.readWorkspaceSnapshot('workspace-id');
+
+      assert.deepEqual(restored?.metadata.layerState, {
+        availableLayers: ['file', 'text'],
+        activeLayer: 'symbol'
+      });
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
     }
   });
 });

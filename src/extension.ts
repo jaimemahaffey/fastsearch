@@ -10,7 +10,7 @@ import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
-import { createLayerAvailability, hasLayer, markLayerAvailable } from './core/indexLayerState';
+import { createLayerAvailability, hasLayer, markLayerActive, markLayerAvailable, toPersistedLayerState } from './core/indexLayerState';
 import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
@@ -21,7 +21,7 @@ import { SemanticEnrichmentService } from './semantics/semanticEnrichmentService
 import { SemanticIndex } from './semantics/semanticIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 import type { FastIndexerConfig } from './configuration';
-import type { IndexLayer, WorkspacePersistence } from './shared/types';
+import type { IndexLayer, PersistedLayerState, WorkspacePersistence } from './shared/types';
 
 const INITIAL_INDEXES_WARMING_MESSAGE = 'Building initial indexes. Please wait a moment.';
 const INITIAL_FILE_LAYER_WARMING_MESSAGE = 'Building initial file index. Please wait a moment.';
@@ -113,17 +113,15 @@ export function activate(context: vscode.ExtensionContext): void {
         () => getConfig().enabled && generation === buildGeneration,
         buildStatus,
         progressToken,
-        (layer) => {
+        async (layer, activeLayer) => {
           layerAvailability = markLayerAvailable(layerAvailability, layer);
           resolveLayerWaiters(layer);
+          await persistLayerCheckpoint(activeLayer);
         }
       );
 
       if (completed !== false && getConfig().enabled) {
-        await persistenceStore.writeWorkspaceSnapshot(
-          workspacePersistence.workspaceId,
-          createPersistedWorkspaceSnapshot(workspacePersistence, activePersistenceConfigHash, fileIndex, symbolIndex, textIndex, semanticIndex)
-        );
+        await persistLayerCheckpoint();
       }
 
       return completed;
@@ -167,6 +165,25 @@ export function activate(context: vscode.ExtensionContext): void {
     for (const layer of layerWaiters.keys()) {
       resolveLayerWaiters(layer);
     }
+  };
+
+  const persistLayerCheckpoint = async (activeLayer?: IndexLayer): Promise<void> => {
+    if (!getConfig().enabled) {
+      return;
+    }
+
+    await persistenceStore.writeWorkspaceSnapshot(
+      workspacePersistence.workspaceId,
+      createPersistedWorkspaceSnapshot(
+        workspacePersistence,
+        activePersistenceConfigHash,
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticIndex,
+        toPersistedLayerState(activeLayer ? markLayerActive(layerAvailability, activeLayer) : layerAvailability)
+      )
+    );
   };
 
   const runQueuedRebuild = (): void => {
@@ -280,10 +297,11 @@ export function activate(context: vscode.ExtensionContext): void {
       textIndex,
       semanticIndex
     )
-      .then((restored) => {
-        restoredSnapshotReady = restored;
-        layerAvailability = restored
-          ? createLayerAvailability(['file', 'text', 'symbol', 'semantic'])
+      .then((snapshot) => {
+        restoredSnapshotReady = snapshot !== undefined;
+        const restoredLayerState = snapshot?.metadata.layerState;
+        layerAvailability = restoredLayerState
+          ? createLayerAvailability(restoredLayerState.availableLayers, restoredLayerState.activeLayer)
           : createLayerAvailability();
       })
       .catch((error) => {
@@ -596,13 +614,13 @@ async function buildWorkspaceIndexes(
   shouldContinue: () => boolean,
   buildStatus: IndexBuildStatusReporter,
   progressToken: number,
-  markLayerReady: (layer: IndexLayer) => void
+  markLayerReady: (layer: IndexLayer, activeLayer?: IndexLayer) => Promise<void>
 ): Promise<boolean> {
   try {
     if (config.include.length === 0) {
-      markLayerReady('file');
-      markLayerReady('text');
-      markLayerReady('symbol');
+      await markLayerReady('file', 'text');
+      await markLayerReady('text', 'symbol');
+      await markLayerReady('symbol');
       return true;
     }
 
@@ -654,7 +672,7 @@ async function buildWorkspaceIndexes(
       }
     }
 
-    markLayerReady('file');
+    await markLayerReady('file', 'text');
     buildStatus.advance(progressToken, {
       processedFiles: skippedFiles,
       skippedFiles,
@@ -694,7 +712,7 @@ async function buildWorkspaceIndexes(
       }
     }
 
-    markLayerReady('text');
+    await markLayerReady('text', 'symbol');
     buildStatus.advance(progressToken, {
       processedFiles: skippedFiles,
       skippedFiles,
@@ -739,7 +757,7 @@ async function buildWorkspaceIndexes(
       }
     }
 
-    markLayerReady('symbol');
+    await markLayerReady('symbol');
 
     return true;
   } catch (error) {
@@ -772,25 +790,25 @@ async function restorePersistedSnapshot(
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
   semanticIndex: SemanticIndex
-): Promise<boolean> {
+): Promise<PersistedWorkspaceSnapshot | undefined> {
   try {
     await refreshIgnoreMatcher();
     const snapshot = await persistenceStore.readWorkspaceSnapshot(workspacePersistence.workspaceId);
     if (!snapshot) {
-      return false;
+      return undefined;
     }
 
     if (!isPersistedSnapshotValid(snapshot, workspacePersistence, getPersistenceConfigHash())) {
       await persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId);
-      return false;
+      return undefined;
     }
 
     hydrateIndexesFromSnapshot(snapshot, fileIndex, symbolIndex, textIndex, semanticIndex);
-    return true;
+    return snapshot;
   } catch (error) {
     await persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId);
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
+      return undefined;
     }
 
     throw error;
@@ -829,13 +847,15 @@ function createPersistedWorkspaceSnapshot(
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
-  semanticIndex: SemanticIndex
+  semanticIndex: SemanticIndex,
+  layerState: PersistedLayerState
 ): PersistedWorkspaceSnapshot {
   return {
     metadata: {
       schemaVersion: PERSISTENCE_SCHEMA_VERSION,
       workspaceId: workspacePersistence.workspaceId,
-      configHash: persistenceConfigHash
+      configHash: persistenceConfigHash,
+      layerState
     },
     fileIndex: fileIndex.all(),
     textIndex: textIndex.allContents(),

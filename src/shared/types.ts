@@ -12,3 +12,8 @@ export type WorkspacePersistence = {
 };
 
 export type IndexLayer = 'file' | 'text' | 'symbol' | 'semantic';
+
+export type PersistedLayerState = {
+  availableLayers: IndexLayer[];
+  activeLayer?: IndexLayer;
+};
