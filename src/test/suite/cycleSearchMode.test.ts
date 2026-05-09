@@ -115,6 +115,11 @@ async function activateWithCycleHarness(
             exclude: [],
             maxFileSizeKb: 512
           })
+                },
+        merkle: {
+          rootHash: '',
+          subtreeHashes: [],
+          leaves: []
         },
         fileIndex: [{
           relativePath: 'src/app/main.ts',
@@ -126,10 +131,12 @@ async function activateWithCycleHarness(
         textIndex: [{
           relativePath: 'src/app/main.ts',
           uri: tempFileUri.toString(),
-          content: 'const alpha = beta;\n'
+          content: 'const alpha = beta;\n',
+          contentHash: 'alpha-hash'
         }],
         symbolIndex: [{
           relativePath: 'src/app/main.ts',
+          contentHash: 'alpha-hash',
           symbols: options.symbolsAvailable === false
             ? []
             : [{

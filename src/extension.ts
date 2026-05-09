@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getDeclarations, getDefinitions, getDocumentSymbols, getHoverSummary, getImplementationsAt, getReferencesAt, getTypeDefinitions } from './bridge/providerBridge';
@@ -10,15 +9,18 @@ import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
+import { hashContent } from './core/contentHash';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
 import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } from './core/ignoreRules';
+import { buildMerkleTree, diffMerkleLeaves, type MerkleLeafRecord, type MerkleTreeSnapshot } from './core/merkleTree';
+import { toPersistedSubtreeHashes, type PersistedMerkleSnapshot } from './core/merkleSnapshot';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
 import { FileIndex } from './indexes/fileIndex';
-import { SymbolIndex, type SymbolRecord } from './indexes/symbolIndex';
+import { SymbolIndex } from './indexes/symbolIndex';
 import { TextIndex } from './indexes/textIndex';
 import { SemanticEnrichmentService } from './semantics/semanticEnrichmentService';
-import { SemanticIndex, type SemanticIndexFileEntry } from './semantics/semanticIndex';
+import { SemanticIndex } from './semantics/semanticIndex';
 import { isEligibleTextFile } from './shared/fileEligibility';
 import type { FastIndexerConfig } from './configuration';
 import type { WorkspacePersistence } from './shared/types';
@@ -32,43 +34,14 @@ const PERSISTENCE_SCHEMA_VERSION = 2;
 
 type IndexBuildKind = 'initial' | 'rebuild';
 
-type IndexedFileCacheEntry = {
-  relativePath: string;
-  uri: string;
-  contentHash: string;
+type WorkspaceMerkleEntry = MerkleLeafRecord & {
   textContent?: string;
-  symbols?: SymbolRecord[];
-  semanticEntries?: SemanticIndexFileEntry['entries'];
 };
 
-type MerkleLeafRecord = {
-  relativePath: string;
-  uri: string;
-  contentHash: string;
-  size: number;
-};
-
-type MerkleSubtreeHash = {
-  path: string;
-  hash: string;
-};
-
-type MerkleTree = {
-  rootHash: string;
-  subtreeHashes: MerkleSubtreeHash[];
-  leavesByPath: Map<string, MerkleLeafRecord>;
-};
-
-type MerkleLeafDiff = {
-  added: MerkleLeafRecord[];
-  removed: MerkleLeafRecord[];
-  changed: MerkleLeafRecord[];
-  unchanged: MerkleLeafRecord[];
-};
-
-type MerkleScanResult = {
-  leaves: MerkleLeafRecord[];
-  hadReadFailures: boolean;
+type BuildWorkspaceIndexesResult = {
+  completed: boolean;
+  canPersistSnapshot: boolean;
+  merkle?: MerkleTreeSnapshot;
 };
 
 type IndexBuildProgress = {
@@ -112,7 +85,8 @@ export function activate(context: vscode.ExtensionContext): void {
   let activePersistenceConfigHash = createPersistenceConfigHash(config, []);
   let configuredIgnoreFilePaths = new Set<string>();
   let buildGeneration = 0;
-  let restoredSnapshot: PersistedWorkspaceSnapshot | undefined;
+  let workspaceMerkleState: MerkleTreeSnapshot | undefined;
+  let pendingUpdateJobs: UpdateJob[] = [];
   const refreshIgnoreMatcher = async (): Promise<IgnoreMatcher> => {
     const loadedIgnoreMatcher = await loadConfiguredIgnoreMatcher(
       vscode.workspace.fs,
@@ -137,7 +111,7 @@ export function activate(context: vscode.ExtensionContext): void {
     try {
       const currentConfig = getConfig();
       const ignoreMatcher = await refreshIgnoreMatcher();
-      const buildResult = await buildWorkspaceIndexes(
+      const completed = await buildWorkspaceIndexes(
         fileIndex,
         symbolIndex,
         textIndex,
@@ -146,31 +120,30 @@ export function activate(context: vscode.ExtensionContext): void {
         generation,
         currentConfig,
         ignoreMatcher,
-        restoredSnapshot,
         output,
         () => getConfig().enabled && generation === buildGeneration,
         buildStatus,
-        progressToken
+        progressToken,
+        buildKind === 'initial' ? restoredSnapshot : undefined
       );
 
-      if (buildResult.completed !== false && getConfig().enabled && buildResult.currentTree) {
-        const persistedSnapshot = createPersistedWorkspaceSnapshot(
-          workspacePersistence,
-          activePersistenceConfigHash,
-          fileIndex,
-          symbolIndex,
-          textIndex,
-          semanticIndex,
-          buildResult.currentTree
-        );
+      workspaceMerkleState = completed.completed ? completed.merkle : undefined;
+      if (completed.completed && getConfig().enabled && completed.canPersistSnapshot && completed.merkle) {
         await persistenceStore.writeWorkspaceSnapshot(
           workspacePersistence.workspaceId,
-          persistedSnapshot
+          createPersistedWorkspaceSnapshot(
+            workspacePersistence,
+            activePersistenceConfigHash,
+            fileIndex,
+            symbolIndex,
+            textIndex,
+            semanticIndex,
+            completed.merkle
+          )
         );
-        restoredSnapshot = persistedSnapshot;
       }
 
-      return buildResult.completed;
+      return completed.completed;
     } finally {
       buildStatus.finish(progressToken);
     }
@@ -183,6 +156,8 @@ export function activate(context: vscode.ExtensionContext): void {
       symbolIndex.clear();
       textIndex.clear();
       semanticIndex.clear();
+      workspaceMerkleState = undefined;
+      pendingUpdateJobs = [];
     },
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
     buildWorkspace
@@ -195,6 +170,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let initialSnapshotRestorePending = false;
   let initialSnapshotPromise: Promise<void> = Promise.resolve();
   let restoredSnapshotReady = false;
+  let restoredSnapshot: PersistedWorkspaceSnapshot | undefined;
   let initialBuildToken = 0;
   let activeBuildProgressToken = 0;
   let currentBuildKind: IndexBuildKind = 'initial';
@@ -207,6 +183,7 @@ export function activate(context: vscode.ExtensionContext): void {
     rebuildQueued = false;
     rebuildTimeout = setTimeout(() => {
       rebuildTimeout = undefined;
+      pendingUpdateJobs = [];
       rebuildInFlight = true;
       void coordinator.rebuild()
         .catch((error) => {
@@ -216,6 +193,11 @@ export function activate(context: vscode.ExtensionContext): void {
           rebuildInFlight = false;
           if (rebuildQueued) {
             runQueuedRebuild();
+            return;
+          }
+
+          if (pendingUpdateJobs.length > 0) {
+            runQueuedIncrementalUpdate();
           }
         });
     }, getConfig().debounceMs);
@@ -226,6 +208,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
+    pendingUpdateJobs = [];
     rebuildQueued = true;
     coordinator.markStale();
 
@@ -235,6 +218,147 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     runQueuedRebuild();
+  };
+
+  const applyIncrementalMerkleUpdates = async (
+    jobs: UpdateJob[],
+    generation: number,
+    config: FastIndexerConfig,
+    incrementalSemanticService: SemanticEnrichmentService
+  ): Promise<boolean> => {
+    if (!workspaceMerkleState) {
+      return false;
+    }
+
+    const shouldContinue = () => getConfig().enabled && generation === buildGeneration;
+    const merkleLeaves = new Map<string, WorkspaceMerkleEntry>(
+      [...workspaceMerkleState.leavesByPath.entries()].map(([relativePath, leaf]) => [relativePath, { ...leaf }])
+    );
+
+    for (const job of jobs) {
+      const relativePath = normalizeWorkspaceMerklePath(job.relativePath);
+      if (job.type === 'delete') {
+        removeWorkspaceFileEntries(relativePath, fileIndex, symbolIndex, textIndex, semanticIndex);
+        merkleLeaves.delete(relativePath);
+        continue;
+      }
+
+      if (!job.filePath) {
+        throw new Error(`Missing file path for ${job.type} update on ${relativePath}`);
+      }
+
+      const file = vscode.Uri.file(job.filePath);
+      let merkleEntry: WorkspaceMerkleEntry;
+      try {
+        merkleEntry = await readWorkspaceMerkleEntry(file, relativePath, config);
+      } catch (error) {
+        if (isMissingFileError(error)) {
+          removeWorkspaceFileEntries(relativePath, fileIndex, symbolIndex, textIndex, semanticIndex);
+          merkleLeaves.delete(relativePath);
+          continue;
+        }
+
+        throw error;
+      }
+      const result = await reindexWorkspaceFile(
+        file,
+        relativePath,
+        config,
+        generation,
+        output,
+        shouldContinue,
+        incrementalSemanticService,
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticIndex,
+        merkleEntry.textContent
+      );
+
+      if (result.aborted) {
+        return false;
+      }
+
+      merkleLeaves.set(relativePath, merkleEntry);
+    }
+
+    if (!shouldContinue()) {
+      return false;
+    }
+
+    workspaceMerkleState = buildMerkleTree([...merkleLeaves.values()]);
+    await persistenceStore.writeWorkspaceSnapshot(
+      workspacePersistence.workspaceId,
+      createPersistedWorkspaceSnapshot(
+        workspacePersistence,
+        activePersistenceConfigHash,
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticIndex,
+        workspaceMerkleState
+      )
+    );
+
+    return true;
+  };
+
+  const runQueuedIncrementalUpdate = (): void => {
+    if (
+      initialFileIndexBuildPending
+      || rebuildInFlight
+      || rebuildQueued
+      || rebuildTimeout !== undefined
+      || pendingUpdateJobs.length === 0
+    ) {
+      return;
+    }
+
+    if (!workspaceMerkleState) {
+      queueWorkspaceRefresh();
+      return;
+    }
+
+    const jobs = pendingUpdateJobs.splice(0, pendingUpdateJobs.length);
+    coordinator.markStale();
+    rebuildInFlight = true;
+    semanticService.cancelGeneration(buildGeneration);
+    buildGeneration += 1;
+    const generation = buildGeneration;
+    const currentConfig = getConfig();
+    semanticService = createSemanticService(semanticIndex, currentConfig, output);
+    const incrementalSemanticService = semanticService;
+    let needsFullRebuild = false;
+
+    void applyIncrementalMerkleUpdates(jobs, generation, currentConfig, incrementalSemanticService)
+      .then((completed) => {
+        if (completed && getConfig().enabled && generation === buildGeneration) {
+          coordinator.markReady();
+          return;
+        }
+
+        needsFullRebuild = getConfig().enabled;
+      })
+      .catch((error) => {
+        needsFullRebuild = getConfig().enabled;
+        output.appendLine(`Failed to apply incremental workspace updates: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        rebuildInFlight = false;
+        if (needsFullRebuild) {
+          queueWorkspaceRefresh();
+          return;
+        }
+
+        if (rebuildQueued) {
+          runQueuedRebuild();
+          return;
+        }
+
+        if (pendingUpdateJobs.length > 0) {
+          runQueuedIncrementalUpdate();
+        }
+      });
   };
 
   const queueWorkspaceRefreshForJob = (job: UpdateJob): void => {
@@ -253,7 +377,15 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    queueWorkspaceRefresh();
+    if (rebuildQueued || rebuildTimeout !== undefined) {
+      return;
+    }
+
+    pendingUpdateJobs.push({
+      ...job,
+      relativePath: normalizeWorkspaceMerklePath(job.relativePath)
+    });
+    runQueuedIncrementalUpdate();
   };
 
   const beginBuildGate = (runner: () => Promise<boolean | void>): void => {
@@ -289,6 +421,11 @@ export function activate(context: vscode.ExtensionContext): void {
         initialFileIndexBuildPending = false;
         if (rebuildQueued) {
           runQueuedRebuild();
+          return;
+        }
+
+        if (pendingUpdateJobs.length > 0) {
+          runQueuedIncrementalUpdate();
         }
       });
   };
@@ -308,11 +445,12 @@ export function activate(context: vscode.ExtensionContext): void {
       textIndex,
       semanticIndex
     )
-      .then((restored) => {
-        restoredSnapshot = restored;
-        restoredSnapshotReady = restored !== undefined;
+      .then((snapshot) => {
+        restoredSnapshot = snapshot;
+        restoredSnapshotReady = snapshot !== undefined;
       })
       .catch((error) => {
+        restoredSnapshot = undefined;
         restoredSnapshotReady = false;
         output.appendLine(`Failed to restore persisted workspace snapshot: ${error instanceof Error ? error.message : String(error)}`);
       })
@@ -330,9 +468,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     rebuildQueued = false;
+    pendingUpdateJobs = [];
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
     semanticService = createSemanticService(semanticIndex, getConfig(), output);
+    workspaceMerkleState = undefined;
     coordinator.markStale();
     beginBuildGate(() => coordinator.rebuild());
   };
@@ -571,10 +711,12 @@ export function activate(context: vscode.ExtensionContext): void {
           semanticService.clear();
           rebuildQueued = false;
           rebuildInFlight = false;
+          pendingUpdateJobs = [];
           fileIndex.clear();
           symbolIndex.clear();
           textIndex.clear();
           semanticIndex.clear();
+          workspaceMerkleState = undefined;
           coordinator.markStale();
           initialFileIndexBuildPending = false;
           output.appendLine('Background indexing disabled by configuration.');
@@ -603,220 +745,292 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-async function buildWorkspaceIndexes(
+function normalizeWorkspaceMerklePath(relativePath: string): string {
+  return relativePath.replace(/\\/g, '/');
+}
+
+function isMissingFileError(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code;
+  return code === 'ENOENT' || code === 'FileNotFound';
+}
+
+function isPersistedMerkleSnapshot(snapshot: PersistedWorkspaceSnapshot['merkle'] | undefined): snapshot is PersistedMerkleSnapshot {
+  return !!snapshot
+    && typeof snapshot.rootHash === 'string'
+    && Array.isArray(snapshot.subtreeHashes)
+    && snapshot.subtreeHashes.every((entry) => entry && typeof entry.path === 'string' && typeof entry.hash === 'string')
+    && Array.isArray(snapshot.leaves)
+    && snapshot.leaves.every((leaf) =>
+      leaf
+      && typeof leaf.relativePath === 'string'
+      && typeof leaf.uri === 'string'
+      && typeof leaf.contentHash === 'string'
+      && typeof leaf.size === 'number'
+    );
+}
+
+function createWorkspaceMerkleLeafMap(leaves: WorkspaceMerkleEntry[]): Map<string, WorkspaceMerkleEntry> {
+  return new Map(leaves.map((leaf) => [normalizeWorkspaceMerklePath(leaf.relativePath), leaf] as const));
+}
+
+async function readWorkspaceMerkleEntry(
+  file: vscode.Uri,
+  relativePath: string,
+  config: FastIndexerConfig
+): Promise<WorkspaceMerkleEntry> {
+  const bytes = await vscode.workspace.fs.readFile(file);
+  const size = bytes.byteLength;
+  const entry: WorkspaceMerkleEntry = {
+    relativePath,
+    uri: file.toString(),
+    contentHash: hashContent(Buffer.from(bytes)),
+    size
+  };
+  if (isEligibleTextFile(relativePath, size, config.maxFileSizeKb)) {
+    entry.textContent = Buffer.from(bytes).toString('utf8');
+  }
+  return entry;
+}
+
+function createPersistedMerkleLeafMap(leaves: PersistedWorkspaceSnapshot['merkle']['leaves']): Map<string, PersistedWorkspaceSnapshot['merkle']['leaves'][number]> {
+  return new Map(leaves.map((leaf) => [normalizeWorkspaceMerklePath(leaf.relativePath), leaf] as const));
+}
+
+function removeWorkspaceFileEntries(
+  relativePath: string,
   fileIndex: FileIndex,
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
-  semanticService: SemanticEnrichmentService,
-  semanticIndex: SemanticIndex,
+  semanticIndex: SemanticIndex
+): void {
+  fileIndex.removeForFile(relativePath);
+  symbolIndex.removeForFile(relativePath);
+  textIndex.removeForFile(relativePath);
+  semanticIndex.removeForFile(relativePath);
+}
+
+async function reindexWorkspaceFile(
+  file: vscode.Uri,
+  relativePath: string,
+  config: FastIndexerConfig,
   generation: number,
+  output: vscode.OutputChannel,
+  shouldContinue: () => boolean,
+  semanticService: SemanticEnrichmentService,
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex,
+  semanticIndex: SemanticIndex,
+  textContent?: string
+): Promise<{ aborted: boolean; symbolTimedOut: boolean; textReadFailed: boolean; }> {
+  removeWorkspaceFileEntries(relativePath, fileIndex, symbolIndex, textIndex, semanticIndex);
+  fileIndex.upsert(relativePath, file.toString(), toIndexedFileKey(file, relativePath));
+
+  let symbolTimedOut = false;
+  try {
+    const symbolResult = await getDocumentSymbolsForBuild(file, config.symbolProviderTimeoutMs);
+    if (!shouldContinue()) {
+      return { aborted: true, symbolTimedOut, textReadFailed: false };
+    }
+
+    if (symbolResult.timedOut) {
+      symbolTimedOut = true;
+      output.appendLine(
+        `Timed out reading document symbols for ${relativePath} after ${config.symbolProviderTimeoutMs}ms; continuing without symbol results.`
+      );
+    } else {
+      symbolIndex.replaceForFile(relativePath, symbolResult.symbols);
+      semanticService.enqueueFile(relativePath, symbolResult.symbols, generation);
+    }
+  } catch (error) {
+    output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  let textReadFailed = false;
+  try {
+    const content = textContent !== undefined
+      ? textContent
+      : await readEligibleTextContent(vscode.workspace.fs, file, relativePath, config.maxFileSizeKb);
+    if (!shouldContinue()) {
+      return { aborted: true, symbolTimedOut, textReadFailed };
+    }
+
+    if (content !== undefined) {
+      textIndex.upsert(relativePath, file.toString(), content);
+    }
+  } catch (error) {
+    textReadFailed = true;
+    output.appendLine(`Failed to read ${relativePath} for text indexing: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return { aborted: false, symbolTimedOut, textReadFailed };
+}
+
+async function refreshWorkspaceSymbolsOnly(
+  file: vscode.Uri,
+  relativePath: string,
+  config: FastIndexerConfig,
+  generation: number,
+  output: vscode.OutputChannel,
+  shouldContinue: () => boolean,
+  semanticService: SemanticEnrichmentService,
+  symbolIndex: SymbolIndex,
+  semanticIndex: SemanticIndex
+): Promise<{ aborted: boolean; symbolTimedOut: boolean; }> {
+  symbolIndex.removeForFile(relativePath);
+  semanticIndex.removeForFile(relativePath);
+
+  let symbolTimedOut = false;
+  try {
+    const symbolResult = await getDocumentSymbolsForBuild(file, config.symbolProviderTimeoutMs);
+    if (!shouldContinue()) {
+      return { aborted: true, symbolTimedOut };
+    }
+
+    if (symbolResult.timedOut) {
+      symbolTimedOut = true;
+      output.appendLine(
+        `Timed out reading document symbols for ${relativePath} after ${config.symbolProviderTimeoutMs}ms; continuing without symbol results.`
+      );
+    } else {
+      symbolIndex.replaceForFile(relativePath, symbolResult.symbols);
+      semanticService.enqueueFile(relativePath, symbolResult.symbols, generation);
+    }
+  } catch (error) {
+    output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return { aborted: false, symbolTimedOut };
+}
+
+async function buildCurrentWorkspaceMerkle(
+  files: vscode.Uri[],
   config: FastIndexerConfig,
   ignoreMatcher: IgnoreMatcher,
-  previousSnapshot: PersistedWorkspaceSnapshot | undefined,
   output: vscode.OutputChannel,
   shouldContinue: () => boolean,
   buildStatus: IndexBuildStatusReporter,
   progressToken: number
-): Promise<{ completed: boolean; currentTree?: MerkleTree }> {
-  try {
-    if (config.include.length === 0) {
-      return { completed: true, currentTree: buildMerkleTree([]) };
+): Promise<{ tree: MerkleTreeSnapshot; leavesByPath: Map<string, WorkspaceMerkleEntry>; } | undefined> {
+  const leaves: WorkspaceMerkleEntry[] = [];
+  let processedFiles = 0;
+  let skippedFiles = 0;
+  let symbolTimeouts = 0;
+
+  buildStatus.setTotalFiles(progressToken, files.length);
+  for (const file of files) {
+    if (!shouldContinue()) {
+      return undefined;
     }
 
-    const files = await vscode.workspace.findFiles(
-      toGlobExpression(config.include, '**/*'),
-      toGlobExpression([WORKSPACE_FILE_EXCLUDE_GLOB, ...config.exclude], WORKSPACE_FILE_EXCLUDE_GLOB)
-    );
-
-    buildStatus.setTotalFiles(progressToken, files.length);
-    if (files.length > 0) {
+    const relativePath = normalizeWorkspaceMerklePath(vscode.workspace.asRelativePath(file, true));
+    if (ignoreMatcher.ignores(file.fsPath, relativePath)) {
+      processedFiles += 1;
+      skippedFiles += 1;
       buildStatus.advance(progressToken, {
-        processedFiles: 1,
-        skippedFiles: 0,
-        symbolTimeouts: 0,
-        currentFile: vscode.workspace.asRelativePath(files[0]!, true)
+        processedFiles,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: relativePath
       });
+      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
+        await yieldToEventLoop();
+      }
+      continue;
     }
 
-    const currentLeavesResult = await buildCurrentMerkleLeaves(files, ignoreMatcher, output);
-    const currentLeaves = currentLeavesResult.leaves;
-    const currentTree = buildMerkleTree(currentLeaves);
-    const previousLeaves = new Map(
-      (previousSnapshot?.merkle?.leaves ?? []).map((leaf) => [leaf.relativePath, leaf])
-    );
-    const canReuseMerkle = previousSnapshot?.merkle !== undefined && !currentLeavesResult.hadReadFailures;
+    try {
+      leaves.push(await readWorkspaceMerkleEntry(file, relativePath, config));
+    } catch (error) {
+      output.appendLine(`Failed to read ${relativePath} for Merkle indexing: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
 
-    let processedFiles = 0;
-    let symbolTimeouts = 0;
-    if (canReuseMerkle) {
-      const skippedFiles = files.length - currentLeaves.length;
-      const diff = diffMerkleLeaves(previousLeaves, currentTree.leavesByPath);
+    processedFiles += 1;
+    buildStatus.advance(progressToken, {
+      processedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: relativePath
+    });
+    if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
+      await yieldToEventLoop();
+    }
+  }
 
-      for (const removedLeaf of diff.removed) {
-        if (!shouldContinue()) {
-          return { completed: false };
-        }
+  try {
+    const tree = buildMerkleTree(leaves);
+    return {
+      tree,
+      leavesByPath: createWorkspaceMerkleLeafMap(leaves)
+    };
+  } catch (error) {
+    output.appendLine(`Failed to build workspace Merkle tree: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
 
-        fileIndex.removeForFile(removedLeaf.relativePath, toIndexedFileKey(vscode.Uri.parse(removedLeaf.uri), removedLeaf.relativePath));
-        textIndex.removeForFile(removedLeaf.relativePath);
-        symbolIndex.removeForFile(removedLeaf.relativePath);
-        semanticIndex.removeForFile(removedLeaf.relativePath);
+async function buildWorkspaceIndexesFull(
+  files: vscode.Uri[],
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex,
+  semanticService: SemanticEnrichmentService,
+  generation: number,
+  config: FastIndexerConfig,
+  ignoreMatcher: IgnoreMatcher,
+  output: vscode.OutputChannel,
+  shouldContinue: () => boolean,
+  buildStatus: IndexBuildStatusReporter,
+  progressToken: number,
+  semanticIndex: SemanticIndex,
+  clearExistingEntries = false
+): Promise<BuildWorkspaceIndexesResult> {
+  if (clearExistingEntries) {
+    fileIndex.clear();
+    symbolIndex.clear();
+    textIndex.clear();
+    semanticIndex.clear();
+  }
+
+  const merkleLeaves: WorkspaceMerkleEntry[] = [];
+  let processedFiles = 0;
+  let skippedFiles = 0;
+  let symbolTimeouts = 0;
+
+  buildStatus.setTotalFiles(progressToken, files.length);
+  for (const file of files) {
+    if (!shouldContinue()) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    const relativePath = normalizeWorkspaceMerklePath(vscode.workspace.asRelativePath(file, true));
+    if (ignoreMatcher.ignores(file.fsPath, relativePath)) {
+      processedFiles += 1;
+      skippedFiles += 1;
+      buildStatus.advance(progressToken, {
+        processedFiles,
+        skippedFiles,
+        symbolTimeouts,
+        currentFile: relativePath
+      });
+      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
+        await yieldToEventLoop();
       }
+      continue;
+    }
 
-      for (const unchangedLeaf of diff.unchanged) {
-        if (!shouldContinue()) {
-          return { completed: false };
-        }
-
-        const persistedTextEntry = previousSnapshot?.textIndex.find((entry) =>
-          entry.relativePath === unchangedLeaf.relativePath && entry.contentHash === unchangedLeaf.contentHash
-        );
-        const persistedSymbolEntry = previousSnapshot?.symbolIndex.find((entry) =>
-          entry.relativePath === unchangedLeaf.relativePath && entry.contentHash === unchangedLeaf.contentHash
-        );
-        const persistedSemanticEntries = previousSnapshot?.semanticIndex?.find((entry) =>
-          entry.relativePath === unchangedLeaf.relativePath
-        )?.entries;
-
-        fileIndex.upsert(unchangedLeaf.relativePath, unchangedLeaf.uri, toIndexedFileKey(vscode.Uri.parse(unchangedLeaf.uri), unchangedLeaf.relativePath));
-        if (persistedTextEntry) {
-          textIndex.upsert(persistedTextEntry.relativePath, persistedTextEntry.uri, persistedTextEntry.content, persistedTextEntry.contentHash);
-        }
-        if (persistedSymbolEntry) {
-          symbolIndex.replaceForFile(persistedSymbolEntry.relativePath, persistedSymbolEntry.symbols, persistedSymbolEntry.contentHash);
-        }
-        if (persistedSemanticEntries) {
-          semanticIndex.replaceForFile(unchangedLeaf.relativePath, persistedSemanticEntries);
-        }
+    let merkleEntry: WorkspaceMerkleEntry | undefined;
+    try {
+      merkleEntry = await readWorkspaceMerkleEntry(file, relativePath, config);
+    } catch (error) {
+      output.appendLine(`Failed to read ${relativePath} for Merkle indexing: ${error instanceof Error ? error.message : String(error)}`);
+      try {
+        merkleEntry = await readWorkspaceMerkleEntry(file, relativePath, config);
+      } catch (retryError) {
+        skippedFiles += 1;
         processedFiles += 1;
-        buildStatus.advance(progressToken, {
-          processedFiles,
-          skippedFiles,
-          symbolTimeouts,
-          currentFile: unchangedLeaf.relativePath
-        });
-        if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
-          await yieldToEventLoop();
-        }
-      }
-
-      for (const leaf of [...diff.added, ...diff.changed]) {
-        if (!shouldContinue()) {
-          return { completed: false };
-        }
-
-        fileIndex.upsert(leaf.relativePath, leaf.uri, toIndexedFileKey(vscode.Uri.parse(leaf.uri), leaf.relativePath));
-        semanticIndex.removeForFile(leaf.relativePath);
-        symbolIndex.removeForFile(leaf.relativePath);
-
-        try {
-          const fileUri = vscode.Uri.parse(leaf.uri);
-          const symbolResult = await getDocumentSymbolsForBuild(fileUri, config.symbolProviderTimeoutMs);
-          if (!shouldContinue()) {
-            return { completed: false };
-          }
-
-          if (symbolResult.timedOut) {
-            symbolTimeouts += 1;
-            output.appendLine(
-              `Timed out reading document symbols for ${leaf.relativePath} after ${config.symbolProviderTimeoutMs}ms; continuing without symbol results.`
-            );
-            symbolIndex.removeForFile(leaf.relativePath);
-          } else {
-            symbolIndex.replaceForFile(leaf.relativePath, symbolResult.symbols, leaf.contentHash);
-            semanticService.enqueueFile(leaf.relativePath, symbolResult.symbols, generation);
-          }
-        } catch (error) {
-          symbolIndex.removeForFile(leaf.relativePath);
-          output.appendLine(`Failed to read ${leaf.relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
-        }
-
-        try {
-          const fileUri = vscode.Uri.parse(leaf.uri);
-          const content = await readEligibleTextContent(vscode.workspace.fs, fileUri, leaf.relativePath, config.maxFileSizeKb);
-          if (!shouldContinue()) {
-            return { completed: false };
-          }
-
-          if (content !== undefined) {
-            textIndex.upsert(leaf.relativePath, leaf.uri, content, leaf.contentHash);
-          } else {
-            textIndex.removeForFile(leaf.relativePath);
-          }
-        } catch (error) {
-          textIndex.removeForFile(leaf.relativePath);
-          output.appendLine(`Failed to read ${leaf.relativePath} for text indexing: ${error instanceof Error ? error.message : String(error)}`);
-        }
-
-        processedFiles += 1;
-        buildStatus.advance(progressToken, {
-          processedFiles,
-          skippedFiles,
-          symbolTimeouts,
-          currentFile: leaf.relativePath
-        });
-        if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
-          await yieldToEventLoop();
-        }
-      }
-    } else {
-      let skippedFiles = 0;
-      for (const file of files) {
-        if (!shouldContinue()) {
-          return { completed: false };
-        }
-
-        const relativePath = vscode.workspace.asRelativePath(file, true);
-        if (ignoreMatcher.ignores(file.fsPath, relativePath)) {
-          processedFiles += 1;
-          skippedFiles += 1;
-          buildStatus.advance(progressToken, {
-            processedFiles,
-            skippedFiles,
-            symbolTimeouts,
-            currentFile: relativePath
-          });
-          if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
-            await yieldToEventLoop();
-          }
-          continue;
-        }
-
-        fileIndex.upsert(relativePath, file.toString(), toIndexedFileKey(file, relativePath));
-
-        try {
-          const symbolResult = await getDocumentSymbolsForBuild(file, config.symbolProviderTimeoutMs);
-          if (!shouldContinue()) {
-            return { completed: false };
-          }
-
-          if (symbolResult.timedOut) {
-            symbolTimeouts += 1;
-            output.appendLine(
-              `Timed out reading document symbols for ${relativePath} after ${config.symbolProviderTimeoutMs}ms; continuing without symbol results.`
-            );
-          } else {
-            symbolIndex.replaceForFile(relativePath, symbolResult.symbols, currentTree.leavesByPath.get(relativePath)?.contentHash);
-            semanticService.enqueueFile(relativePath, symbolResult.symbols, generation);
-          }
-        } catch (error) {
-          output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
-        }
-
-        try {
-          const content = await readEligibleTextContent(vscode.workspace.fs, file, relativePath, config.maxFileSizeKb);
-          if (!shouldContinue()) {
-            return { completed: false };
-          }
-
-          if (content !== undefined) {
-            textIndex.upsert(relativePath, file.toString(), content, currentTree.leavesByPath.get(relativePath)?.contentHash);
-          }
-        } catch (error) {
-          output.appendLine(`Failed to read ${relativePath} for text indexing: ${error instanceof Error ? error.message : String(error)}`);
-        }
-
-        processedFiles += 1;
+        output.appendLine(`Skipping ${relativePath} because Merkle indexing could not read the file: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
         buildStatus.advance(progressToken, {
           processedFiles,
           skippedFiles,
@@ -826,13 +1040,272 @@ async function buildWorkspaceIndexes(
         if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
           await yieldToEventLoop();
         }
+        continue;
       }
     }
 
-    return { completed: true, currentTree };
+    merkleLeaves.push(merkleEntry);
+
+    const result = await reindexWorkspaceFile(
+      file,
+      relativePath,
+      config,
+      generation,
+      output,
+      shouldContinue,
+      semanticService,
+      fileIndex,
+      symbolIndex,
+      textIndex,
+      semanticIndex,
+      merkleEntry.textContent
+    );
+
+    if (result.aborted) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    if (result.symbolTimedOut) {
+      symbolTimeouts += 1;
+    }
+
+    processedFiles += 1;
+    buildStatus.advance(progressToken, {
+      processedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: relativePath
+    });
+    if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, processedFiles)) {
+      await yieldToEventLoop();
+    }
+  }
+
+  try {
+    return {
+      completed: true,
+      canPersistSnapshot: true,
+      merkle: buildMerkleTree(merkleLeaves)
+    };
+  } catch (error) {
+    output.appendLine(`Failed to build workspace Merkle tree: ${error instanceof Error ? error.message : String(error)}`);
+    return { completed: true, canPersistSnapshot: false };
+  }
+}
+
+async function reconcileWorkspaceIndexesFromMerkle(
+  currentMerkle: { tree: MerkleTreeSnapshot; leavesByPath: Map<string, WorkspaceMerkleEntry>; },
+  previousSnapshot: PersistedWorkspaceSnapshot,
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex,
+  semanticService: SemanticEnrichmentService,
+  semanticIndex: SemanticIndex,
+  generation: number,
+  config: FastIndexerConfig,
+  output: vscode.OutputChannel,
+  shouldContinue: () => boolean,
+  buildStatus: IndexBuildStatusReporter,
+  progressToken: number
+): Promise<BuildWorkspaceIndexesResult> {
+  const previousMerkleLeaves = createPersistedMerkleLeafMap(previousSnapshot.merkle.leaves);
+  const previousSymbolEntries = new Map(
+    previousSnapshot.symbolIndex.map((entry) => [normalizeWorkspaceMerklePath(entry.relativePath), entry] as const)
+  );
+  const diff = diffMerkleLeaves(previousMerkleLeaves as Map<string, MerkleLeafRecord>, currentMerkle.leavesByPath);
+  const symbolOnlyLeaves = diff.unchanged.filter((leaf) => {
+    const previousSymbolEntry = previousSymbolEntries.get(leaf.relativePath);
+    return !previousSymbolEntry?.contentHash || previousSymbolEntry.contentHash !== leaf.contentHash;
+  });
+  const totalWork = diff.removed.length + diff.changed.length + diff.added.length + symbolOnlyLeaves.length;
+  let processedFiles = 0;
+  let skippedFiles = 0;
+  let symbolTimeouts = 0;
+
+  buildStatus.setTotalFiles(progressToken, totalWork);
+
+  for (const leaf of diff.removed) {
+    if (!shouldContinue()) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    removeWorkspaceFileEntries(leaf.relativePath, fileIndex, symbolIndex, textIndex, semanticIndex);
+    processedFiles += 1;
+    buildStatus.advance(progressToken, {
+      processedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: leaf.relativePath
+    });
+  }
+
+  for (const leaf of [...diff.changed, ...diff.added]) {
+    if (!shouldContinue()) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    const file = vscode.Uri.parse(leaf.uri);
+    const currentLeaf = currentMerkle.leavesByPath.get(leaf.relativePath);
+    if (!currentLeaf) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    const result = await reindexWorkspaceFile(
+      file,
+      currentLeaf.relativePath,
+      config,
+      generation,
+      output,
+      shouldContinue,
+      semanticService,
+      fileIndex,
+      symbolIndex,
+      textIndex,
+      semanticIndex,
+      currentLeaf.textContent
+    );
+
+    if (result.aborted) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    if (result.symbolTimedOut) {
+      symbolTimeouts += 1;
+    }
+
+    processedFiles += 1;
+    buildStatus.advance(progressToken, {
+      processedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: leaf.relativePath
+    });
+  }
+
+  for (const leaf of symbolOnlyLeaves) {
+    if (!shouldContinue()) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    const file = vscode.Uri.parse(leaf.uri);
+    const result = await refreshWorkspaceSymbolsOnly(
+      file,
+      leaf.relativePath,
+      config,
+      generation,
+      output,
+      shouldContinue,
+      semanticService,
+      symbolIndex,
+      semanticIndex
+    );
+
+    if (result.aborted) {
+      return { completed: false, canPersistSnapshot: false };
+    }
+
+    if (result.symbolTimedOut) {
+      symbolTimeouts += 1;
+    }
+
+    processedFiles += 1;
+    buildStatus.advance(progressToken, {
+      processedFiles,
+      skippedFiles,
+      symbolTimeouts,
+      currentFile: leaf.relativePath
+    });
+  }
+
+  return {
+    completed: true,
+    canPersistSnapshot: true,
+    merkle: currentMerkle.tree
+  };
+}
+
+async function buildWorkspaceIndexes(
+  fileIndex: FileIndex,
+  symbolIndex: SymbolIndex,
+  textIndex: TextIndex,
+  semanticService: SemanticEnrichmentService,
+  semanticIndex: SemanticIndex,
+  generation: number,
+  config: FastIndexerConfig,
+  ignoreMatcher: IgnoreMatcher,
+  output: vscode.OutputChannel,
+  shouldContinue: () => boolean,
+  buildStatus: IndexBuildStatusReporter,
+  progressToken: number,
+  previousSnapshot?: PersistedWorkspaceSnapshot
+): Promise<BuildWorkspaceIndexesResult> {
+  try {
+    if (config.include.length === 0) {
+      return { completed: true, canPersistSnapshot: false };
+    }
+
+    const files = await vscode.workspace.findFiles(
+      toGlobExpression(config.include, '**/*'),
+      toGlobExpression([WORKSPACE_FILE_EXCLUDE_GLOB, ...config.exclude], WORKSPACE_FILE_EXCLUDE_GLOB)
+    );
+
+    const safePreviousMerkle = isPersistedMerkleSnapshot(previousSnapshot?.merkle) ? previousSnapshot.merkle : undefined;
+    if (safePreviousMerkle) {
+      const currentMerkle = await buildCurrentWorkspaceMerkle(files, config, ignoreMatcher, output, shouldContinue, buildStatus, progressToken);
+      if (!currentMerkle) {
+        return await buildWorkspaceIndexesFull(
+          files,
+          fileIndex,
+          symbolIndex,
+          textIndex,
+          semanticService,
+          generation,
+          config,
+          ignoreMatcher,
+          output,
+          shouldContinue,
+          buildStatus,
+          progressToken,
+          semanticIndex,
+          true
+        );
+      }
+
+      return await reconcileWorkspaceIndexesFromMerkle(
+        currentMerkle,
+        previousSnapshot!,
+        fileIndex,
+        symbolIndex,
+        textIndex,
+        semanticService,
+        semanticIndex,
+        generation,
+        config,
+        output,
+        shouldContinue,
+        buildStatus,
+        progressToken
+      );
+    }
+
+    return await buildWorkspaceIndexesFull(
+      files,
+      fileIndex,
+      symbolIndex,
+      textIndex,
+      semanticService,
+      generation,
+      config,
+      ignoreMatcher,
+      output,
+      shouldContinue,
+      buildStatus,
+      progressToken,
+      semanticIndex
+    );
   } catch (error) {
     output.appendLine(`Failed to build initial file index: ${error instanceof Error ? error.message : String(error)}`);
-    return { completed: false };
+    return { completed: false, canPersistSnapshot: false };
   }
 }
 
@@ -901,10 +1374,10 @@ function hydrateIndexesFromSnapshot(
     fileIndex.upsert(entry.relativePath, entry.uri, toIndexedSnapshotKey(entry));
   });
   snapshot.textIndex.forEach((entry) => {
-    textIndex.upsert(entry.relativePath, entry.uri, entry.content, entry.contentHash);
+    textIndex.upsert(entry.relativePath, entry.uri, entry.content);
   });
   snapshot.symbolIndex.forEach((entry) => {
-    symbolIndex.replaceForFile(entry.relativePath, entry.symbols, entry.contentHash);
+    symbolIndex.replaceForFile(entry.relativePath, entry.symbols);
   });
   snapshot.semanticIndex?.forEach((entry) => {
     semanticIndex.replaceForFile(entry.relativePath, entry.entries);
@@ -918,150 +1391,47 @@ function createPersistedWorkspaceSnapshot(
   symbolIndex: SymbolIndex,
   textIndex: TextIndex,
   semanticIndex: SemanticIndex,
-  currentTree: MerkleTree
+  merkleSnapshot: MerkleTreeSnapshot
 ): PersistedWorkspaceSnapshot {
+  const persistedMerkleLeaves = [...merkleSnapshot.leavesByPath.values()].map((leaf) => ({
+    relativePath: leaf.relativePath,
+    uri: leaf.uri,
+    contentHash: leaf.contentHash,
+    size: leaf.size
+  }));
+  const merkleTrackedPaths = new Set(persistedMerkleLeaves.map((leaf) => normalizeWorkspaceMerklePath(leaf.relativePath)));
+  const contentHashByPath = new Map(persistedMerkleLeaves.map((leaf) => [normalizeWorkspaceMerklePath(leaf.relativePath), leaf.contentHash] as const));
+  const persistedTextEntries = textIndex.allContents()
+    .filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath)))
+    .map((entry) => ({
+      relativePath: entry.relativePath,
+      uri: entry.uri,
+      content: entry.content,
+      contentHash: contentHashByPath.get(normalizeWorkspaceMerklePath(entry.relativePath)) ?? hashContent(entry.content)
+    }));
   return {
     metadata: {
       schemaVersion: PERSISTENCE_SCHEMA_VERSION,
       workspaceId: workspacePersistence.workspaceId,
       configHash: persistenceConfigHash
     },
-    fileIndex: fileIndex.all(),
-    textIndex: textIndex.allContents(),
-    symbolIndex: symbolIndex.allByFile(),
-    semanticIndex: semanticIndex.allByFile(),
+    fileIndex: fileIndex.all().filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath))),
     merkle: {
-      rootHash: currentTree.rootHash,
-      subtreeHashes: toPersistedSubtreeHashes(currentTree.subtreeHashes),
-      leaves: [...currentTree.leavesByPath.values()]
-    }
+      rootHash: merkleSnapshot.rootHash,
+      subtreeHashes: toPersistedSubtreeHashes(merkleSnapshot.subtreeHashes),
+      leaves: persistedMerkleLeaves
+    },
+    textIndex: persistedTextEntries,
+    symbolIndex: symbolIndex.allByFile()
+      .filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath)))
+      .map((entry) => ({
+        relativePath: entry.relativePath,
+        contentHash: contentHashByPath.get(normalizeWorkspaceMerklePath(entry.relativePath)) ?? null,
+        symbols: entry.symbols
+      })),
+    semanticIndex: semanticIndex.allByFile()
+      .filter((entry) => merkleTrackedPaths.has(normalizeWorkspaceMerklePath(entry.relativePath)))
   };
-}
-
-async function buildCurrentMerkleLeaves(
-  files: vscode.Uri[],
-  ignoreMatcher: IgnoreMatcher,
-  output: vscode.OutputChannel
-): Promise<MerkleScanResult> {
-  const leaves: MerkleLeafRecord[] = [];
-  let hadReadFailures = false;
-
-  for (const file of files) {
-    const relativePath = vscode.workspace.asRelativePath(file, true);
-    if (ignoreMatcher.ignores(file.fsPath, relativePath)) {
-      continue;
-    }
-
-    try {
-      const bytes = await vscode.workspace.fs.readFile(file);
-      leaves.push({
-        relativePath,
-        uri: file.toString(),
-        contentHash: hashContent(Buffer.from(bytes)),
-        size: bytes.byteLength
-      });
-    } catch (error) {
-      hadReadFailures = true;
-      output.appendLine(`Failed to read ${relativePath} while building Merkle leaves: ${error instanceof Error ? error.message : String(error)}`);
-      leaves.push({
-        relativePath,
-        uri: file.toString(),
-        contentHash: hashContent(file.toString()),
-        size: 0
-      });
-    }
-  }
-
-  return { leaves, hadReadFailures };
-}
-
-function buildMerkleTree(leaves: MerkleLeafRecord[]): MerkleTree {
-  const sortedLeaves = [...leaves].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
-  const leavesByPath = new Map(sortedLeaves.map((leaf) => [leaf.relativePath, leaf] as const));
-  const subtreeGroups = new Map<string, MerkleLeafRecord[]>();
-
-  for (const leaf of sortedLeaves) {
-    const subtreePath = getMerkleSubtreePath(leaf.relativePath);
-    const entries = subtreeGroups.get(subtreePath) ?? [];
-    entries.push(leaf);
-    subtreeGroups.set(subtreePath, entries);
-  }
-
-  const subtreeHashes = [...subtreeGroups.entries()]
-    .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
-    .map(([pathName, groupedLeaves]) => ({
-      path: pathName,
-      hash: hashContent(groupedLeaves
-        .map((leaf) => `${leaf.relativePath}:${leaf.contentHash}:${leaf.size}`)
-        .join('\n'))
-    }));
-
-  const rootSource = subtreeHashes.length > 0
-    ? subtreeHashes.map((entry) => `${entry.path}:${entry.hash}`).join('\n')
-    : sortedLeaves.map((leaf) => `${leaf.relativePath}:${leaf.contentHash}:${leaf.size}`).join('\n');
-
-  return {
-    rootHash: hashContent(rootSource),
-    subtreeHashes,
-    leavesByPath
-  };
-}
-
-function diffMerkleLeaves(
-  previousLeaves: Map<string, MerkleLeafRecord>,
-  currentLeaves: Map<string, MerkleLeafRecord>
-): MerkleLeafDiff {
-  const added: MerkleLeafRecord[] = [];
-  const removed: MerkleLeafRecord[] = [];
-  const changed: MerkleLeafRecord[] = [];
-  const unchanged: MerkleLeafRecord[] = [];
-
-  for (const [relativePath, currentLeaf] of currentLeaves) {
-    const previousLeaf = previousLeaves.get(relativePath);
-    if (!previousLeaf) {
-      added.push(currentLeaf);
-      continue;
-    }
-
-    if (previousLeaf.uri === currentLeaf.uri
-      && previousLeaf.contentHash === currentLeaf.contentHash
-      && previousLeaf.size === currentLeaf.size) {
-      unchanged.push(currentLeaf);
-      continue;
-    }
-
-    changed.push(currentLeaf);
-  }
-
-  for (const [relativePath, previousLeaf] of previousLeaves) {
-    if (!currentLeaves.has(relativePath)) {
-      removed.push(previousLeaf);
-    }
-  }
-
-  const sortByRelativePath = (left: MerkleLeafRecord, right: MerkleLeafRecord) =>
-    left.relativePath.localeCompare(right.relativePath);
-
-  return {
-    added: added.sort(sortByRelativePath),
-    removed: removed.sort(sortByRelativePath),
-    changed: changed.sort(sortByRelativePath),
-    unchanged: unchanged.sort(sortByRelativePath)
-  };
-}
-
-function getMerkleSubtreePath(relativePath: string): string {
-  const normalizedPath = relativePath.replace(/\\/g, '/');
-  const directoryPath = path.posix.dirname(normalizedPath);
-  return directoryPath === '.' ? normalizedPath : directoryPath;
-}
-
-function toPersistedSubtreeHashes(subtreeHashes: MerkleSubtreeHash[]): MerkleSubtreeHash[] {
-  return [...subtreeHashes].sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function hashContent(content: string | Buffer): string {
-  return createHash('sha256').update(content).digest('hex');
 }
 
 function toIndexedFileKey(file: vscode.Uri, relativePath: string): string {

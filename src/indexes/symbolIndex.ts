@@ -11,40 +11,49 @@ export type SymbolRecord = {
 };
 
 export class SymbolIndex {
-  private readonly byFile = new Map<string, { contentHash?: string | null; symbols: SymbolRecord[] }>();
+  private readonly byFile = new Map<string, SymbolRecord[]>();
 
-  allByFile(): Array<{ relativePath: string; contentHash?: string | null; symbols: SymbolRecord[]; }> {
+  allByFile(): Array<{ relativePath: string; symbols: SymbolRecord[]; }> {
     return [...this.byFile.entries()].map(([relativePath, symbols]) => ({
       relativePath,
-      contentHash: symbols.contentHash,
-      symbols: [...symbols.symbols]
+      symbols: [...symbols]
     }));
   }
 
   all(): SymbolRecord[] {
-    return [...this.byFile.values()].flatMap((entry) => entry.symbols);
+    return [...this.byFile.values()].flat();
   }
 
   isEmpty(): boolean {
-    return this.byFile.size === 0 || [...this.byFile.values()].every((entry) => entry.symbols.length === 0);
+    return this.byFile.size === 0 || [...this.byFile.values()].every((symbols) => symbols.length === 0);
   }
 
   clear(): void {
     this.byFile.clear();
   }
 
-  replaceForFile(relativePath: string, symbols: SymbolRecord[], contentHash?: string | null): void {
-    this.byFile.set(relativePath, { symbols, contentHash });
-  }
-
   removeForFile(relativePath: string): void {
     this.byFile.delete(relativePath);
+  }
+
+  moveFile(fromRelativePath: string, toRelativePath: string): void {
+    const existing = this.byFile.get(fromRelativePath);
+    if (!existing) {
+      return;
+    }
+
+    this.byFile.delete(fromRelativePath);
+    this.byFile.set(toRelativePath, existing);
+  }
+
+  replaceForFile(relativePath: string, symbols: SymbolRecord[]): void {
+    this.byFile.set(relativePath, symbols);
   }
 
   search(query: string): SymbolRecord[] {
     const needle = query.toLowerCase();
     return [...this.byFile.values()]
-      .flatMap((entry) => entry.symbols)
+      .flat()
       .filter((symbol) => symbol.name.toLowerCase().includes(needle))
       .sort((a, b) => Number(a.approximate) - Number(b.approximate) || a.name.localeCompare(b.name));
   }
