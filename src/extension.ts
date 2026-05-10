@@ -1815,6 +1815,7 @@ async function buildWorkspaceIndexesLayered(
       markLayerReady('file');
       markLayerReady('text');
       markLayerReady('symbol');
+      enqueueSymbolHydration([], generation);
       return { completed: true, canPersistSnapshot: false };
     }
 
