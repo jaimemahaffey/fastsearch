@@ -41,6 +41,7 @@ const INDEX_BUILD_YIELD_INTERVAL = 50;
 const INDEX_BUILD_STATUS_PRIORITY = 100;
 const PERSISTENCE_SCHEMA_VERSION = 2;
 const TEXT_PHASE_CONCURRENCY = 8;
+const TEXT_HYDRATION_BATCH_SIZE = 100;
 const SYMBOL_PHASE_CONCURRENCY = 1;
 const SYMBOL_HYDRATION_BATCH_SIZE = 25;
 
@@ -60,6 +61,12 @@ type BuildWorkspaceIndexesResult = {
   canPersistSnapshot: boolean;
   merkle?: MerkleTreeSnapshot;
 };
+
+type PersistCheckpoint = (
+  merkleSnapshot: MerkleTreeSnapshot,
+  activeLayer?: IndexLayer,
+  shouldPersist?: () => boolean
+) => Promise<void>;
 
 type IndexBuildProgress = {
   phase: 'discovering' | 'indexing';
@@ -105,8 +112,14 @@ export function activate(context: vscode.ExtensionContext): void {
   let buildGeneration = 0;
   let workspaceMerkleState: MerkleTreeSnapshot | undefined;
   let workspaceMerkleGeneration = 0;
+  let activeBuildMerkleState: MerkleTreeSnapshot | undefined;
+  let activeBuildMerkleGeneration = 0;
   let pendingUpdateJobs: UpdateJob[] = [];
   let symbolHydrationScheduler: SymbolHydrationScheduler | undefined;
+  const clearActiveBuildMerkleState = (): void => {
+    activeBuildMerkleState = undefined;
+    activeBuildMerkleGeneration = 0;
+  };
   const enqueueSymbolHydration = (items: SymbolHydrationPlanItem[], generation: number): void => {
     if (items.length === 0 || !symbolHydrationScheduler) {
       return;
@@ -141,6 +154,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const buildKind = currentBuildKind;
     buildStatus.start(progressToken, buildKind);
     const generation = ++buildGeneration;
+    clearActiveBuildMerkleState();
     resetSymbolHydrationScheduler();
 
     try {
@@ -165,6 +179,17 @@ export function activate(context: vscode.ExtensionContext): void {
           resolveLayerWaiters(layer);
         },
         persistLayerCheckpoint,
+        (merkle, merkleGeneration) => {
+          if (merkleGeneration === buildGeneration) {
+            activeBuildMerkleState = merkle;
+            activeBuildMerkleGeneration = merkleGeneration;
+          }
+        },
+        (merkle, merkleGeneration) =>
+          getConfig().enabled
+          && buildGeneration === merkleGeneration
+          && activeBuildMerkleGeneration === merkleGeneration
+          && activeBuildMerkleState === merkle,
         enqueueSymbolHydration
       );
 
@@ -188,10 +213,11 @@ export function activate(context: vscode.ExtensionContext): void {
       symbolIndex.clear();
       textIndex.clear();
       semanticIndex.clear();
-      workspaceMerkleState = undefined;
-      workspaceMerkleGeneration = 0;
-      pendingUpdateJobs = [];
-    },
+        workspaceMerkleState = undefined;
+        workspaceMerkleGeneration = 0;
+        clearActiveBuildMerkleState();
+        pendingUpdateJobs = [];
+      },
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
     buildWorkspace
   });
@@ -397,6 +423,7 @@ export function activate(context: vscode.ExtensionContext): void {
     rebuildInFlight = true;
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
+    clearActiveBuildMerkleState();
     resetSymbolHydrationScheduler();
     const generation = buildGeneration;
     const currentConfig = getConfig();
@@ -510,6 +537,7 @@ export function activate(context: vscode.ExtensionContext): void {
     coordinator.markWarming();
     restoredSnapshotReady = false;
     layerAvailability = createLayerAvailability();
+    clearActiveBuildMerkleState();
     initialSnapshotRestorePending = true;
     initialSnapshotPromise = restorePersistedSnapshot(
       persistenceStore,
@@ -554,6 +582,7 @@ export function activate(context: vscode.ExtensionContext): void {
     pendingUpdateJobs = [];
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
+    clearActiveBuildMerkleState();
     resetSymbolHydrationScheduler();
     semanticService = createSemanticService(semanticIndex, getConfig(), output);
     workspaceMerkleState = undefined;
@@ -848,6 +877,7 @@ export function activate(context: vscode.ExtensionContext): void {
           semanticIndex.clear();
           workspaceMerkleState = undefined;
           workspaceMerkleGeneration = 0;
+          clearActiveBuildMerkleState();
           coordinator.markStale();
           initialFileIndexBuildPending = false;
           resolveAllLayerWaiters();
@@ -1685,7 +1715,9 @@ async function buildWorkspaceIndexesLayered(
   progressToken: number,
   previousSnapshot: PersistedWorkspaceSnapshot | undefined,
   markLayerReady: (layer: IndexLayer) => void,
-  persistCheckpoint: (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer) => Promise<void>,
+  persistCheckpoint: PersistCheckpoint,
+  setCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => void,
+  isCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => boolean,
   enqueueSymbolHydration: (items: SymbolHydrationPlanItem[], generation: number) => void
 ): Promise<BuildWorkspaceIndexesResult> {
   try {
@@ -1713,6 +1745,7 @@ async function buildWorkspaceIndexesLayered(
     }).filePhase;
     const skippedFiles = files.length - sortedCandidates.length;
     const restoredFileLayer = canReuseSnapshotLayer(previousSnapshot, 'file');
+    const restoredTextLayer = canReuseSnapshotLayer(previousSnapshot, 'text');
     let symbolTimeouts = 0;
 
     pruneRestoredWorkspaceEntries(fileIndex, symbolIndex, textIndex, semanticIndex, sortedCandidates);
@@ -1783,7 +1816,14 @@ async function buildWorkspaceIndexesLayered(
       return fallback;
     }
 
-    await persistCheckpoint(currentMerkle.tree, 'text');
+    const expectedGeneration = generation;
+    const expectedMerkle = currentMerkle.tree;
+    setCurrentBuildMerkle(expectedMerkle, expectedGeneration);
+    const shouldPersistCurrentMerkle = () =>
+      shouldContinue()
+      && isCurrentBuildMerkle(expectedMerkle, expectedGeneration);
+
+    await persistCheckpoint(expectedMerkle, 'text', shouldPersistCurrentMerkle);
 
     const reuseHints = createReuseHintsFromSnapshot(previousSnapshot, currentMerkle);
     const plan = createIndexBuildPlan(sortedCandidates, reuseHints);
@@ -1797,7 +1837,37 @@ async function buildWorkspaceIndexesLayered(
       }
     }
     let textPhaseProcessed = skippedFiles + reuseHints.text.size;
+    let textBatchProcessed = 0;
+    let textLayerMarkedReady = restoredTextLayer || (reuseHints.text.size > 0 && plan.textPhase.length === 0);
+    let readyTextCheckpointAttempted = false;
     let stopTextPhase = false;
+
+    const markTextLayerReady = (): boolean => {
+      if (textLayerMarkedReady) {
+        return false;
+      }
+
+      textLayerMarkedReady = true;
+      markLayerReady('text');
+      return true;
+    };
+
+    const tryMarkTextReadyForBatch = (): boolean => {
+      if (textLayerMarkedReady || textBatchProcessed < TEXT_HYDRATION_BATCH_SIZE || !shouldContinue()) {
+        return false;
+      }
+
+      return markTextLayerReady();
+    };
+
+    const persistReadyTextCheckpoint = async (): Promise<void> => {
+      if (readyTextCheckpointAttempted) {
+        return;
+      }
+
+      readyTextCheckpointAttempted = true;
+      await persistCheckpoint(expectedMerkle, 'text', shouldPersistCurrentMerkle);
+    };
 
     buildStatus.advance(progressToken, {
       processedFiles: textPhaseProcessed,
@@ -1821,6 +1891,7 @@ async function buildWorkspaceIndexesLayered(
       }
 
       textPhaseProcessed += 1;
+      textBatchProcessed += 1;
       buildStatus.advance(progressToken, {
         processedFiles: textPhaseProcessed,
         skippedFiles,
@@ -1828,6 +1899,9 @@ async function buildWorkspaceIndexesLayered(
         currentFile: candidate.relativePath,
         currentLayer: 'text'
       });
+      if (tryMarkTextReadyForBatch()) {
+        await persistReadyTextCheckpoint();
+      }
       if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, textPhaseProcessed - skippedFiles)) {
         await yieldToEventLoop();
       }
@@ -1837,7 +1911,9 @@ async function buildWorkspaceIndexesLayered(
       return { completed: false, canPersistSnapshot: false };
     }
 
-    markLayerReady('text');
+    if (!textLayerMarkedReady) {
+      markTextLayerReady();
+    }
     for (const candidate of plan.symbolPhase) {
       symbolIndex.removeForFile(candidate.relativePath);
       semanticIndex.removeForFile(candidate.relativePath);

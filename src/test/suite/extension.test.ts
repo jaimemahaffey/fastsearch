@@ -847,6 +847,317 @@ suite('extension activation', () => {
     }
   });
 
+  test('go to text is usable after the initial text hydration batch while later text work continues', async () => {
+    const workspaceRoot = 'c:\\workspace';
+    const workspaceUri = vscode.Uri.file(workspaceRoot);
+    const expectedTextHydrationBatchSize = 100;
+    const fileCount = 1000;
+    const files = Array.from({ length: fileCount }, (_, index) =>
+      vscode.Uri.file(path.join(workspaceRoot, 'src', `batch-${String(index).padStart(4, '0')}.ts`))
+    );
+    const fileContents = Object.fromEntries(
+      files.map((file, index) => [
+        file.fsPath,
+        `export const batch${index} = "hydrationNeedle ${index}";\n`
+      ])
+    );
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    const quickPicks: Array<FakeQuickPick<vscode.QuickPickItem & { description?: string; }>> = [];
+    const originalTextUpsert = TextIndex.prototype.upsert;
+    let textUpsertCount = 0;
+    let goToTextPromise: Promise<unknown> | undefined;
+    let releaseCommandStarted: (() => void) | undefined;
+    const commandStarted = new Promise<void>((resolve) => {
+      releaseCommandStarted = resolve;
+    });
+    let releaseReadyTextCheckpoint: (() => void) | undefined;
+    let readyTextCheckpointBlocked = false;
+    let readyTextCheckpointWrites = 0;
+    const readyTextCheckpointEntryCounts: number[] = [];
+    let completedSnapshotWritten = false;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => registeredCommands.delete(command));
+    }) as typeof vscode.commands.registerCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => files) as typeof vscode.workspace.findFiles);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true,
+            completionStyleResults: true,
+            useRipgrep: false,
+            semanticEnrichment: false
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      return typeof pathOrUri === 'string'
+        ? pathOrUri
+        : path.relative(workspaceRoot, pathOrUri.fsPath).replace(/\\/g, '/');
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', (((_uri: vscode.Uri) => ({
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    })) as unknown) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const quickPickPatch = patchProperty(vscode.window, 'createQuickPick', ((() => {
+      const quickPick = new FakeQuickPick<vscode.QuickPickItem & { description?: string; }>();
+      quickPicks.push(quickPick);
+      return quickPick;
+    }) as unknown) as typeof vscode.window.createQuickPick);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async (_workspaceId, snapshot) => {
+        const layerState = snapshot.metadata.layerState;
+        if (
+          layerState?.activeLayer === 'text'
+          && layerState.availableLayers.includes('text')
+          && !isCompleteLayerSnapshot(snapshot)
+        ) {
+          readyTextCheckpointWrites += 1;
+          readyTextCheckpointEntryCounts.push(snapshot.textIndex.length);
+          if (!readyTextCheckpointBlocked) {
+            readyTextCheckpointBlocked = true;
+            assert.ok(
+              snapshot.textIndex.length >= expectedTextHydrationBatchSize,
+              `expected ready text checkpoint to contain at least ${expectedTextHydrationBatchSize} text entries, found ${snapshot.textIndex.length}`
+            );
+            return await new Promise<void>((resolve) => {
+              releaseReadyTextCheckpoint = resolve;
+            });
+          }
+        }
+
+        if (isCompleteLayerSnapshot(snapshot)) {
+          completedSnapshotWritten = true;
+        }
+      }) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+    const fsPatch = patchProperty(vscode.workspace, 'fs', createWorkspaceFsStub(fileContents));
+    const executePatch = patchProperty(vscode.commands, 'executeCommand', (async () => []) as typeof vscode.commands.executeCommand);
+    const textUpsertPatch = patchProperty(TextIndex.prototype, 'upsert', function (this: TextIndex, relativePath: string, uri: string, content: string) {
+      textUpsertCount += 1;
+      const result = originalTextUpsert.call(this, relativePath, uri, content);
+      if (textUpsertCount === expectedTextHydrationBatchSize && !goToTextPromise) {
+        goToTextPromise = Promise.resolve(registeredCommands.get('fastIndexer.goToText')?.());
+        releaseCommandStarted?.();
+      }
+      return result;
+    } as typeof TextIndex.prototype.upsert);
+
+    try {
+      activate({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+      await waitFor(() => registeredCommands.has('fastIndexer.goToText'), 'goToText command registration');
+      await commandStarted;
+      await goToTextPromise;
+
+      assert.equal(readyTextCheckpointBlocked, true);
+      assert.equal(readyTextCheckpointWrites, 1);
+      assert.deepEqual(readyTextCheckpointEntryCounts, [expectedTextHydrationBatchSize]);
+      assert.equal(completedSnapshotWritten, false);
+      assert.ok(textUpsertCount < fileCount, `expected text command before all files hydrated, processed ${textUpsertCount}`);
+      assert.equal(quickPicks.length, 1);
+      assert.equal(quickPicks[0]?.showed, true);
+
+      const itemsUpdated = quickPicks[0]!.waitForItemsUpdate();
+      quickPicks[0]!.fireChangeValue('hydrationNeedle');
+      await itemsUpdated;
+      assert.ok(quickPicks[0]!.items.length > 0);
+
+      releaseReadyTextCheckpoint?.();
+      await waitFor(() => completedSnapshotWritten, 'final complete snapshot persistence');
+      assert.equal(readyTextCheckpointWrites, 1);
+    } finally {
+      releaseReadyTextCheckpoint?.();
+      restoreProperty(textUpsertPatch);
+      restoreProperty(executePatch);
+      restoreProperty(fsPatch);
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(quickPickPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(configPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+    }
+  });
+
+  test('skips early text checkpoint persistence when the build generation changes at the persistence boundary', async () => {
+    const workspaceRoot = 'c:\\workspace';
+    const workspaceUri = vscode.Uri.file(workspaceRoot);
+    const file = vscode.Uri.file(path.join(workspaceRoot, 'src', 'alpha.ts'));
+    const fileContent = 'export const alpha = "generation-race";\n';
+    const originalWorkspaceFs = vscode.workspace.fs;
+    let indexingEnabled = true;
+    let configurationListener: ((event: vscode.ConfigurationChangeEvent) => unknown) | undefined;
+    let merkleReadComplete = false;
+    let enabledChecksAfterMerkleRead = 0;
+    let raceTriggered = false;
+    let staleEarlyTextWrites = 0;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((() => new vscode.Disposable(() => undefined)) as unknown) as typeof vscode.commands.registerCommand);
+    const executePatch = patchProperty(vscode.commands, 'executeCommand', (async () => []) as typeof vscode.commands.executeCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => [file]) as typeof vscode.workspace.findFiles);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          if (key === 'enabled') {
+            if (merkleReadComplete) {
+              enabledChecksAfterMerkleRead += 1;
+            }
+
+            // With one file, the third enabled check after Merkle read completion is the
+            // early text checkpoint boundary: post-read, final Merkle check, checkpoint.
+            if (enabledChecksAfterMerkleRead === 3 && !raceTriggered) {
+              raceTriggered = true;
+              indexingEnabled = false;
+              configurationListener?.({
+                affectsConfiguration: (name: string) => name === 'fastIndexer.enabled'
+              } as vscode.ConfigurationChangeEvent);
+              return true as T;
+            }
+
+            return indexingEnabled as T;
+          }
+
+          const values: Record<string, unknown> = {
+            completionStyleResults: false,
+            useRipgrep: false,
+            semanticEnrichment: false
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) =>
+      typeof pathOrUri === 'string'
+        ? pathOrUri
+        : path.relative(workspaceRoot, pathOrUri.fsPath).replace(/\\/g, '/')
+    ) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', (((_uri: vscode.Uri) => ({
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    })) as unknown) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      configurationListener = listener;
+      return new vscode.Disposable(() => {
+        configurationListener = undefined;
+      });
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async (_workspaceId, snapshot) => {
+        if (raceTriggered && snapshot.metadata.layerState?.activeLayer === 'text') {
+          staleEarlyTextWrites += 1;
+        }
+      }) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+    const fsPatch = patchProperty(vscode.workspace, 'fs', {
+      ...originalWorkspaceFs,
+      stat: async () => ({
+        type: vscode.FileType.File,
+        ctime: 0,
+        mtime: 0,
+        size: Buffer.byteLength(fileContent, 'utf8')
+      }),
+      readFile: async () => {
+        merkleReadComplete = true;
+        return Uint8Array.from(Buffer.from(fileContent));
+      }
+    } as typeof vscode.workspace.fs);
+
+    try {
+      activate({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+      await waitFor(() => raceTriggered, 'generation change during early text checkpoint');
+      await waitFor(() => enabledChecksAfterMerkleRead > 3, 'cancelled early text build to observe cancellation');
+
+      assert.equal(staleEarlyTextWrites, 0, 'stale early text checkpoint should not write after generation changes');
+    } finally {
+      restoreProperty(fsPatch);
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(configPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(executePatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+    }
+  });
+
   test('marks the initial build ready before all provider-backed symbol hydration completes', async () => {
     const workspaceUri = vscode.Uri.file('c:\\workspace');
     const files = [
