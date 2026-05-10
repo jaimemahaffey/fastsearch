@@ -25,7 +25,7 @@ export type SymbolHydrationSchedulerOptions = {
   batchSize: number;
   getGeneration: () => number;
   isCurrent: (item: SymbolHydrationPlanItem, generation: number) => boolean;
-  worker: (item: SymbolHydrationPlanItem) => Promise<SymbolHydrationWorkerResult>;
+  worker: (item: SymbolHydrationPlanItem, generation: number) => Promise<SymbolHydrationWorkerResult>;
   onBatchComplete?: (counts: SymbolHydrationStatusCounts) => Promise<void> | void;
 };
 
@@ -107,7 +107,7 @@ export class SymbolHydrationScheduler {
       this.counts.running += 1;
       let status: SymbolHydrationWorkerStatus = 'failed';
       try {
-        const result = await this.options.worker(next.item);
+        const result = await this.options.worker(next.item, next.generation);
         status = result.status;
       } catch {
         status = 'failed';

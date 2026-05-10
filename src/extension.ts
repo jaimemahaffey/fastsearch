@@ -18,6 +18,8 @@ import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } 
 import { buildMerkleTree, diffMerkleLeaves, type MerkleLeafRecord, type MerkleTreeSnapshot } from './core/merkleTree';
 import { toPersistedSubtreeHashes, type PersistedMerkleSnapshot } from './core/merkleSnapshot';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
+import { createSymbolHydrationPlan, type SymbolHydrationPlanItem } from './core/symbolHydrationPlan';
+import { SymbolHydrationScheduler, type SymbolHydrationWorkerResult } from './core/symbolHydrationScheduler';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
 import { FileIndex } from './indexes/fileIndex';
 import { SymbolIndex } from './indexes/symbolIndex';
@@ -39,6 +41,7 @@ const INDEX_BUILD_STATUS_PRIORITY = 100;
 const PERSISTENCE_SCHEMA_VERSION = 2;
 const TEXT_PHASE_CONCURRENCY = 8;
 const SYMBOL_PHASE_CONCURRENCY = 1;
+const SYMBOL_HYDRATION_BATCH_SIZE = 25;
 
 type IndexBuildKind = 'initial' | 'rebuild';
 
@@ -100,7 +103,23 @@ export function activate(context: vscode.ExtensionContext): void {
   let configuredIgnoreFilePaths = new Set<string>();
   let buildGeneration = 0;
   let workspaceMerkleState: MerkleTreeSnapshot | undefined;
+  let workspaceMerkleGeneration = 0;
   let pendingUpdateJobs: UpdateJob[] = [];
+  let symbolHydrationScheduler: SymbolHydrationScheduler | undefined;
+  const enqueueSymbolHydration = (items: SymbolHydrationPlanItem[], generation: number): void => {
+    if (items.length === 0 || !symbolHydrationScheduler) {
+      return;
+    }
+
+    symbolHydrationScheduler.enqueue(items, generation);
+    void symbolHydrationScheduler.drain().catch((error) => {
+      output.appendLine(`Failed to hydrate workspace symbols: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
+  const resetSymbolHydrationScheduler = (): void => {
+    symbolHydrationScheduler?.cancel();
+    symbolHydrationScheduler = createWorkspaceSymbolHydrationScheduler();
+  };
   const refreshIgnoreMatcher = async (): Promise<IgnoreMatcher> => {
     const loadedIgnoreMatcher = await loadConfiguredIgnoreMatcher(
       vscode.workspace.fs,
@@ -121,6 +140,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const buildKind = currentBuildKind;
     buildStatus.start(progressToken, buildKind);
     const generation = ++buildGeneration;
+    resetSymbolHydrationScheduler();
 
     try {
       const currentConfig = getConfig();
@@ -143,10 +163,12 @@ export function activate(context: vscode.ExtensionContext): void {
           layerAvailability = markLayerAvailable(layerAvailability, layer);
           resolveLayerWaiters(layer);
         },
-        persistLayerCheckpoint
+        persistLayerCheckpoint,
+        enqueueSymbolHydration
       );
 
       workspaceMerkleState = completed.completed ? completed.merkle : undefined;
+      workspaceMerkleGeneration = completed.completed && completed.merkle ? generation : 0;
       if (completed.completed && getConfig().enabled && completed.canPersistSnapshot && completed.merkle) {
         await persistLayerCheckpoint(completed.merkle);
       }
@@ -158,6 +180,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   const coordinator = new IndexCoordinator({
     clearIndexes: () => {
+      resetSymbolHydrationScheduler();
       semanticService.cancelGeneration(buildGeneration);
       semanticService.clear();
       fileIndex.clear();
@@ -165,6 +188,7 @@ export function activate(context: vscode.ExtensionContext): void {
       textIndex.clear();
       semanticIndex.clear();
       workspaceMerkleState = undefined;
+      workspaceMerkleGeneration = 0;
       pendingUpdateJobs = [];
     },
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
@@ -197,8 +221,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  const persistLayerCheckpoint = async (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer): Promise<void> => {
-    if (!getConfig().enabled) {
+  const persistLayerCheckpoint = async (
+    merkleSnapshot: MerkleTreeSnapshot,
+    activeLayer?: IndexLayer,
+    shouldPersist = () => getConfig().enabled
+  ): Promise<void> => {
+    if (!shouldPersist()) {
       return;
     }
 
@@ -216,6 +244,7 @@ export function activate(context: vscode.ExtensionContext): void {
       )
     );
   };
+  symbolHydrationScheduler = createWorkspaceSymbolHydrationScheduler();
 
   const runQueuedRebuild = (): void => {
     if (initialFileIndexBuildPending || rebuildInFlight) {
@@ -329,6 +358,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     workspaceMerkleState = buildMerkleTree([...merkleLeaves.values()]);
+    workspaceMerkleGeneration = generation;
     await persistenceStore.writeWorkspaceSnapshot(
       workspacePersistence.workspaceId,
       createPersistedWorkspaceSnapshot(
@@ -366,6 +396,7 @@ export function activate(context: vscode.ExtensionContext): void {
     rebuildInFlight = true;
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
+    resetSymbolHydrationScheduler();
     const generation = buildGeneration;
     const currentConfig = getConfig();
     semanticService = createSemanticService(semanticIndex, currentConfig, output);
@@ -522,8 +553,10 @@ export function activate(context: vscode.ExtensionContext): void {
     pendingUpdateJobs = [];
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
+    resetSymbolHydrationScheduler();
     semanticService = createSemanticService(semanticIndex, getConfig(), output);
     workspaceMerkleState = undefined;
+    workspaceMerkleGeneration = 0;
     layerAvailability = createLayerAvailability();
     coordinator.markStale();
     beginBuildGate(() => coordinator.rebuild());
@@ -796,6 +829,7 @@ export function activate(context: vscode.ExtensionContext): void {
           initialBuildToken += 1;
           semanticService.cancelGeneration(buildGeneration);
           buildGeneration += 1;
+          symbolHydrationScheduler?.cancel();
           semanticService.clear();
           rebuildQueued = false;
           rebuildInFlight = false;
@@ -805,6 +839,7 @@ export function activate(context: vscode.ExtensionContext): void {
           textIndex.clear();
           semanticIndex.clear();
           workspaceMerkleState = undefined;
+          workspaceMerkleGeneration = 0;
           coordinator.markStale();
           initialFileIndexBuildPending = false;
           resolveAllLayerWaiters();
@@ -827,11 +862,70 @@ export function activate(context: vscode.ExtensionContext): void {
     output,
     {
       dispose: () => {
+        symbolHydrationScheduler?.cancel();
         semanticService.cancelGeneration(buildGeneration);
         semanticService.clear();
       }
     }
   );
+
+  function createWorkspaceSymbolHydrationScheduler(): SymbolHydrationScheduler {
+    return new SymbolHydrationScheduler({
+      concurrency: SYMBOL_PHASE_CONCURRENCY,
+      batchSize: SYMBOL_HYDRATION_BATCH_SIZE,
+      getGeneration: () => buildGeneration,
+      isCurrent: (item, generation) => isCurrentSymbolHydrationItem(item, generation),
+      worker: async (item, generation): Promise<SymbolHydrationWorkerResult> => {
+        const relativePath = normalizeWorkspaceMerklePath(item.relativePath);
+        const result = await refreshWorkspaceSymbolsOnly(
+          item.uri,
+          relativePath,
+          getConfig(),
+          generation,
+          output,
+          () => isCurrentSymbolHydrationItem(item, generation),
+          semanticService,
+          symbolIndex,
+          semanticIndex
+        );
+
+        if (result.aborted) {
+          return { status: 'skipped' };
+        }
+        if (result.symbolTimedOut) {
+          return { status: 'timedOut' };
+        }
+        if (result.failed) {
+          return { status: 'failed' };
+        }
+
+        return { status: 'hydrated' };
+      },
+      onBatchComplete: async () => {
+        const expectedMerkle = workspaceMerkleState;
+        const expectedGeneration = workspaceMerkleGeneration;
+        if (expectedMerkle && expectedGeneration === buildGeneration) {
+          await persistLayerCheckpoint(expectedMerkle, undefined, () =>
+            getConfig().enabled
+            && workspaceMerkleGeneration === expectedGeneration
+            && buildGeneration === expectedGeneration
+            && workspaceMerkleState === expectedMerkle
+          );
+        }
+      }
+    });
+  }
+
+  function isCurrentSymbolHydrationItem(item: SymbolHydrationPlanItem, generation: number): boolean {
+    if (!getConfig().enabled || generation !== buildGeneration) {
+      return false;
+    }
+
+    const leaf = workspaceMerkleGeneration === generation
+      ? workspaceMerkleState?.leavesByPath.get(normalizeWorkspaceMerklePath(item.relativePath))
+      : undefined;
+    return !leaf || leaf.contentHash === item.contentHash;
+  }
 }
 
 function normalizeWorkspaceMerklePath(relativePath: string): string {
@@ -965,7 +1059,11 @@ async function refreshWorkspaceSymbolsOnly(
   semanticService: SemanticEnrichmentService,
   symbolIndex: SymbolIndex,
   semanticIndex: SemanticIndex
-): Promise<{ aborted: boolean; symbolTimedOut: boolean; }> {
+): Promise<{ aborted: boolean; symbolTimedOut: boolean; failed: boolean; }> {
+  if (!shouldContinue()) {
+    return { aborted: true, symbolTimedOut: false, failed: false };
+  }
+
   symbolIndex.removeForFile(relativePath);
   semanticIndex.removeForFile(relativePath);
 
@@ -973,7 +1071,7 @@ async function refreshWorkspaceSymbolsOnly(
   try {
     const symbolResult = await getDocumentSymbolsForBuild(file, config.symbolProviderTimeoutMs);
     if (!shouldContinue()) {
-      return { aborted: true, symbolTimedOut };
+      return { aborted: true, symbolTimedOut, failed: false };
     }
 
     if (symbolResult.timedOut) {
@@ -987,9 +1085,10 @@ async function refreshWorkspaceSymbolsOnly(
     }
   } catch (error) {
     output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
+    return { aborted: false, symbolTimedOut, failed: true };
   }
 
-  return { aborted: false, symbolTimedOut };
+  return { aborted: false, symbolTimedOut, failed: false };
 }
 
 async function buildCurrentWorkspaceMerkle(
@@ -1578,7 +1677,8 @@ async function buildWorkspaceIndexesLayered(
   progressToken: number,
   previousSnapshot: PersistedWorkspaceSnapshot | undefined,
   markLayerReady: (layer: IndexLayer) => void,
-  persistCheckpoint: (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer) => Promise<void>
+  persistCheckpoint: (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer) => Promise<void>,
+  enqueueSymbolHydration: (items: SymbolHydrationPlanItem[], generation: number) => void
 ): Promise<BuildWorkspaceIndexesResult> {
   try {
     if (config.include.length === 0) {
@@ -1730,68 +1830,50 @@ async function buildWorkspaceIndexesLayered(
     }
 
     markLayerReady('text');
+    for (const candidate of plan.symbolPhase) {
+      symbolIndex.removeForFile(candidate.relativePath);
+      semanticIndex.removeForFile(candidate.relativePath);
+    }
     await persistCheckpoint(currentMerkle.tree, 'symbol');
 
-    let symbolPhaseProcessed = skippedFiles + reuseHints.symbol.size;
-    let stopSymbolPhase = false;
     buildStatus.advance(progressToken, {
-      processedFiles: symbolPhaseProcessed,
+      processedFiles: files.length,
       skippedFiles,
       symbolTimeouts,
       currentFile: undefined,
       currentLayer: 'symbol'
     });
 
-    await runPhaseJobs(plan.symbolPhase, SYMBOL_PHASE_CONCURRENCY, async (candidate) => {
-      if (stopSymbolPhase || !shouldContinue()) {
-        stopSymbolPhase = true;
-        return;
-      }
-
+    const symbolHydrationCandidates = [];
+    for (const candidate of plan.symbolPhase) {
       const leaf = currentMerkle.leavesByPath.get(normalizeWorkspaceMerklePath(candidate.relativePath));
       if (!leaf) {
-        symbolIndex.removeForFile(candidate.relativePath);
-        semanticIndex.removeForFile(candidate.relativePath);
-      } else {
-        const result = await refreshWorkspaceSymbolsOnly(
-          candidate.uri,
-          candidate.relativePath,
-          config,
-          generation,
-          output,
-          shouldContinue,
-          semanticService,
-          symbolIndex,
-          semanticIndex
-        );
-
-        if (result.aborted) {
-          stopSymbolPhase = true;
-          return;
-        }
-
-        if (result.symbolTimedOut) {
-          symbolTimeouts += 1;
-        }
+        continue;
       }
 
-      symbolPhaseProcessed += 1;
-      buildStatus.advance(progressToken, {
-        processedFiles: symbolPhaseProcessed,
-        skippedFiles,
-        symbolTimeouts,
-        currentFile: candidate.relativePath,
-        currentLayer: 'symbol'
+      symbolHydrationCandidates.push({
+        uri: candidate.uri,
+        relativePath: candidate.relativePath,
+        contentHash: leaf.contentHash
       });
-      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, symbolPhaseProcessed - skippedFiles)) {
-        await yieldToEventLoop();
-      }
-    });
+    }
 
-    if (stopSymbolPhase || !shouldContinue()) {
+    if (!shouldContinue()) {
       return { completed: false, canPersistSnapshot: false };
     }
 
+    const openPaths = new Set(
+      vscode.window.visibleTextEditors.map((editor) => normalizeWorkspaceMerklePath(vscode.workspace.asRelativePath(editor.document.uri, true)))
+    );
+    const changedPaths = new Set(
+      [...plan.filePhase, ...plan.textPhase].map((candidate) => normalizeWorkspaceMerklePath(candidate.relativePath))
+    );
+    const symbolHydrationPlan = createSymbolHydrationPlan(symbolHydrationCandidates, {
+      openPaths,
+      changedPaths,
+      hydratedPaths: reuseHints.symbol
+    });
+    enqueueSymbolHydration(symbolHydrationPlan.items, generation);
     markLayerReady('symbol');
     return {
       completed: true,
