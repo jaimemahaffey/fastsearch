@@ -853,6 +853,186 @@ suite('extension activation', () => {
     }
   });
 
+  test('records symbolComplete after a merkle read failure falls back to a full build', async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'fast-indexer-benchmark-merkle-fallback-'));
+    const keptFilePath = path.join(workspaceRoot, 'src', 'app', 'kept.ts');
+    const benchmarkPath = path.join(workspaceRoot, 'benchmark', 'events.json');
+    await fs.mkdir(path.dirname(keptFilePath), { recursive: true });
+    await fs.writeFile(keptFilePath, 'export const kept = 1;\n', 'utf8');
+
+    const workspaceUri = vscode.Uri.file(workspaceRoot);
+    const keptUri = vscode.Uri.file(keptFilePath);
+    const persistedSnapshot = createPersistedSnapshot(
+      workspaceUri,
+      [{
+        relativePath: 'src/app/kept.ts',
+        content: 'export const kept = 1;\n',
+        symbolName: 'KeptService',
+        symbolContentHash: hashContent('export const kept = 1;\n')
+      }],
+      toPersistenceConfigHash({ semanticEnrichment: false }),
+      {
+        availableLayers: ['file', 'text', 'symbol'],
+        activeLayer: undefined
+      }
+    );
+    let persistedWrites = 0;
+    let resolveFindFiles: ((value: vscode.Uri[]) => void) | undefined;
+    let merkleReadFailures = 0;
+    const originalBenchmarkPath = process.env.FASTSEARCH_BENCHMARK_PATH;
+    const originalWorkspaceFs = vscode.workspace.fs;
+    const originalReadFile = originalWorkspaceFs.readFile.bind(originalWorkspaceFs);
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', (((_command: string, _callback: (...args: unknown[]) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.commands.registerCommand);
+    const executeCommandPatch = patchProperty(vscode.commands, 'executeCommand', (async (command: string) => {
+      if (command === 'vscode.executeDocumentSymbolProvider') {
+        return [new vscode.DocumentSymbol(
+          'KeptService',
+          '',
+          vscode.SymbolKind.Class,
+          new vscode.Range(0, 0, 0, 6),
+          new vscode.Range(0, 0, 0, 6)
+        )];
+      }
+
+      return [];
+    }) as typeof vscode.commands.executeCommand);
+    const workspaceFsPatch = patchProperty(vscode.workspace, 'fs', {
+      ...originalWorkspaceFs,
+      readFile: (async (uri: vscode.Uri) => {
+        if (path.resolve(uri.fsPath).toLowerCase() === path.resolve(keptFilePath).toLowerCase() && merkleReadFailures === 0) {
+          merkleReadFailures += 1;
+          throw new Error('transient merkle read failure');
+        }
+
+        return originalReadFile(uri);
+      }) as typeof vscode.workspace.fs.readFile
+    } as typeof vscode.workspace.fs);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => new Promise<vscode.Uri[]>((resolve) => {
+      resolveFindFiles = resolve;
+    })) as typeof vscode.workspace.findFiles);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true,
+            completionStyleResults: false,
+            semanticEnrichment: false
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      return typeof pathOrUri === 'string'
+        ? pathOrUri
+        : path.relative(workspaceRoot, pathOrUri.fsPath).replace(/\\/g, '/');
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', ((uri: vscode.Uri) => ({
+      uri: workspaceUri,
+      index: 0,
+      name: uri.fsPath.startsWith(workspaceRoot) ? 'workspace' : 'other'
+    })) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => persistedSnapshot) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async () => {
+        persistedWrites += 1;
+      }) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+
+    process.env.FASTSEARCH_BENCHMARK_PATH = benchmarkPath;
+
+    try {
+      activate({
+        subscriptions: []
+      } as unknown as vscode.ExtensionContext);
+
+      await waitForAsync(async () => {
+        try {
+          const recorded = JSON.parse(await fs.readFile(benchmarkPath, 'utf8')) as { events: Array<{ event: string }> };
+          return recorded.events.some((event) => event.event === 'symbolUsable');
+        } catch {
+          return false;
+        }
+      }, 'restored benchmark events before merkle fallback reconciliation', 1000);
+
+      const initialEvents = JSON.parse(await fs.readFile(benchmarkPath, 'utf8')) as { events: Array<{ event: string }> };
+      assert.deepEqual(
+        initialEvents.events.map((event) => event.event),
+        ['fileReady', 'textReady', 'symbolUsable']
+      );
+
+      resolveFindFiles?.([keptUri]);
+
+      await waitForAsync(async () => {
+        try {
+          const recorded = JSON.parse(await fs.readFile(benchmarkPath, 'utf8')) as { events: Array<{ event: string }> };
+          return recorded.events.some((event) => event.event === 'symbolComplete');
+        } catch {
+          return false;
+        }
+      }, 'symbolComplete benchmark event after merkle fallback full build', 1000);
+
+      const completedEvents = JSON.parse(await fs.readFile(benchmarkPath, 'utf8')) as { events: Array<{ event: string }> };
+      assert.equal(completedEvents.events.filter((event) => event.event === 'symbolComplete').length, 1);
+      assert.equal(merkleReadFailures, 1);
+      assert.ok(persistedWrites >= 1);
+    } finally {
+      if (originalBenchmarkPath === undefined) {
+        delete process.env.FASTSEARCH_BENCHMARK_PATH;
+      } else {
+        process.env.FASTSEARCH_BENCHMARK_PATH = originalBenchmarkPath;
+      }
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(configPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(workspaceFsPatch);
+      restoreProperty(executeCommandPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   test('restores a persisted snapshot so go to file is usable before reconciliation finishes', async () => {
     const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
     const quickPickItems: vscode.QuickPickItem[] = [];
