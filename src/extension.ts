@@ -9,6 +9,7 @@ import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
+import { createIndexBenchmarkRecorder } from './core/indexBenchmarkRecorder';
 import { createIndexBuildPlan } from './core/indexBuildPlanner';
 import { hashContent } from './core/contentHash';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
@@ -94,6 +95,64 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Fast Symbol Indexer');
   const buildStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, INDEX_BUILD_STATUS_PRIORITY);
   const buildStatus = createIndexBuildStatusReporter(buildStatusItem);
+  const benchmarkRecorder = createIndexBenchmarkRecorder(process.env.FASTSEARCH_BENCHMARK_PATH);
+  const benchmarkStartedAt = Date.now();
+  let benchmarkedLayers = new Set<IndexLayer>();
+  const benchmarkElapsedMs = (): number => Date.now() - benchmarkStartedAt;
+  const flushBenchmark = (): void => {
+    if (!benchmarkRecorder.enabled) {
+      return;
+    }
+
+    void benchmarkRecorder.flush().catch((error) => {
+      output.appendLine(`Failed to write indexing benchmark events: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
+  const recordBenchmarkEvent = (event: 'fileReady' | 'textReady' | 'symbolUsable' | 'symbolComplete' | 'symbolBatch', count?: number): void => {
+    if (!benchmarkRecorder.enabled) {
+      return;
+    }
+
+    benchmarkRecorder.record({
+      event,
+      elapsedMs: benchmarkElapsedMs(),
+      ...(count === undefined ? {} : { count })
+    });
+    flushBenchmark();
+  };
+  const resetLayerBenchmarkEvents = (): void => {
+    benchmarkedLayers = new Set<IndexLayer>();
+  };
+  const recordLayerBenchmarkEvent = (layer: IndexLayer): void => {
+    if (benchmarkedLayers.has(layer)) {
+      return;
+    }
+
+    benchmarkedLayers.add(layer);
+    if (layer === 'file') {
+      recordBenchmarkEvent('fileReady');
+      return;
+    }
+
+    if (layer === 'text') {
+      recordBenchmarkEvent('textReady');
+      return;
+    }
+
+    if (layer === 'symbol') {
+      recordBenchmarkEvent('symbolUsable');
+      if (isSymbolHydrationComplete()) {
+        recordBenchmarkEvent('symbolComplete');
+      }
+    }
+  };
+  const recordAvailableLayerBenchmarkEvents = (): void => {
+    for (const layer of ['file', 'text', 'symbol'] as const) {
+      if (hasLayer(layerAvailability, layer)) {
+        recordLayerBenchmarkEvent(layer);
+      }
+    }
+  };
   const getConfig = () => readConfig();
   const config = getConfig();
   const fileIndex = new FileIndex();
@@ -125,10 +184,17 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
+    const scheduler = symbolHydrationScheduler;
     symbolHydrationScheduler.enqueue(items, generation);
-    void symbolHydrationScheduler.drain().catch((error) => {
-      output.appendLine(`Failed to hydrate workspace symbols: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    void scheduler.drain()
+      .then(() => {
+        if (generation === buildGeneration && symbolHydrationScheduler === scheduler && isSymbolHydrationComplete()) {
+          recordBenchmarkEvent('symbolComplete');
+        }
+      })
+      .catch((error) => {
+        output.appendLine(`Failed to hydrate workspace symbols: ${error instanceof Error ? error.message : String(error)}`);
+      });
   };
   const resetSymbolHydrationScheduler = (): void => {
     symbolHydrationScheduler?.cancel();
@@ -176,6 +242,7 @@ export function activate(context: vscode.ExtensionContext): void {
         buildKind === 'initial' ? restoredSnapshot : undefined,
         (layer) => {
           layerAvailability = markLayerAvailable(layerAvailability, layer);
+          recordLayerBenchmarkEvent(layer);
           resolveLayerWaiters(layer);
         },
         persistLayerCheckpoint,
@@ -537,6 +604,7 @@ export function activate(context: vscode.ExtensionContext): void {
     coordinator.markWarming();
     restoredSnapshotReady = false;
     layerAvailability = createLayerAvailability();
+    resetLayerBenchmarkEvents();
     clearActiveBuildMerkleState();
     initialSnapshotRestorePending = true;
     initialSnapshotPromise = restorePersistedSnapshot(
@@ -557,12 +625,14 @@ export function activate(context: vscode.ExtensionContext): void {
               snapshot.metadata.layerState?.activeLayer
             )
           : createLayerAvailability();
+        recordAvailableLayerBenchmarkEvents();
         restoredSnapshotReady = hasLayer(layerAvailability, 'file');
       })
       .catch((error) => {
         restoredSnapshot = undefined;
         restoredSnapshotReady = false;
         layerAvailability = createLayerAvailability();
+        resetLayerBenchmarkEvents();
         output.appendLine(`Failed to restore persisted workspace snapshot: ${error instanceof Error ? error.message : String(error)}`);
       })
       .finally(() => {
@@ -588,6 +658,7 @@ export function activate(context: vscode.ExtensionContext): void {
     workspaceMerkleState = undefined;
     workspaceMerkleGeneration = 0;
     layerAvailability = createLayerAvailability();
+    resetLayerBenchmarkEvents();
     coordinator.markStale();
     beginBuildGate(() => coordinator.rebuild());
   };
@@ -878,6 +949,7 @@ export function activate(context: vscode.ExtensionContext): void {
           workspaceMerkleState = undefined;
           workspaceMerkleGeneration = 0;
           clearActiveBuildMerkleState();
+          resetLayerBenchmarkEvents();
           coordinator.markStale();
           initialFileIndexBuildPending = false;
           resolveAllLayerWaiters();
@@ -939,7 +1011,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
         return { status: 'hydrated' };
       },
-      onBatchComplete: async () => {
+      onBatchComplete: async (counts) => {
+        recordBenchmarkEvent('symbolBatch', counts.hydrated);
         const expectedMerkle = workspaceMerkleState;
         const expectedGeneration = workspaceMerkleGeneration;
         if (expectedMerkle && expectedGeneration === buildGeneration) {
