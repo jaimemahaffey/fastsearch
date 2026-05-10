@@ -61,6 +61,10 @@ type BuildWorkspaceIndexesResult = {
   completed: boolean;
   canPersistSnapshot: boolean;
   merkle?: MerkleTreeSnapshot;
+  pendingSymbolHydration?: {
+    items: SymbolHydrationPlanItem[];
+    generation: number;
+  };
 };
 
 type PersistCheckpoint = (
@@ -276,13 +280,20 @@ export function activate(context: vscode.ExtensionContext): void {
           && buildGeneration === merkleGeneration
           && activeBuildMerkleGeneration === merkleGeneration
           && activeBuildMerkleState === merkle,
-        enqueueSymbolHydration
       );
 
       workspaceMerkleState = completed.completed ? completed.merkle : undefined;
       workspaceMerkleGeneration = completed.completed && completed.merkle ? generation : 0;
       if (completed.completed && getConfig().enabled && completed.canPersistSnapshot && completed.merkle) {
         await persistLayerCheckpoint(completed.merkle);
+      }
+      if (
+        completed.completed
+        && getConfig().enabled
+        && completed.pendingSymbolHydration
+        && completed.pendingSymbolHydration.generation === buildGeneration
+      ) {
+        enqueueSymbolHydration(completed.pendingSymbolHydration.items, completed.pendingSymbolHydration.generation);
       }
 
       return completed.completed;
@@ -1824,16 +1835,18 @@ async function buildWorkspaceIndexesLayered(
   invalidateLayers: InvalidateLayers,
   persistCheckpoint: PersistCheckpoint,
   setCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => void,
-  isCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => boolean,
-  enqueueSymbolHydration: (items: SymbolHydrationPlanItem[], generation: number) => void
+  isCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => boolean
 ): Promise<BuildWorkspaceIndexesResult> {
   try {
     if (config.include.length === 0) {
       markLayerReady('file');
       markLayerReady('text');
       markLayerReady('symbol');
-      enqueueSymbolHydration([], generation);
-      return { completed: true, canPersistSnapshot: false };
+      return {
+        completed: true,
+        canPersistSnapshot: false,
+        pendingSymbolHydration: { items: [], generation }
+      };
     }
 
     const files = await vscode.workspace.findFiles(
@@ -1967,7 +1980,7 @@ async function buildWorkspaceIndexesLayered(
         markLayerReady('file');
         markLayerReady('text');
         markLayerReady('symbol');
-        enqueueSymbolHydration([], generation);
+        fallback.pendingSymbolHydration = { items: [], generation };
       }
       return fallback;
     }
@@ -2110,12 +2123,15 @@ async function buildWorkspaceIndexesLayered(
       changedPaths,
       hydratedPaths: reuseHints.symbol
     });
-    enqueueSymbolHydration(symbolHydrationPlan.items, generation);
     markLayerReady('symbol');
     return {
       completed: true,
       canPersistSnapshot: true,
-      merkle: currentMerkle.tree
+      merkle: currentMerkle.tree,
+      pendingSymbolHydration: {
+        items: symbolHydrationPlan.items,
+        generation
+      }
     };
   } catch (error) {
     output.appendLine(`Failed to build initial file index: ${error instanceof Error ? error.message : String(error)}`);

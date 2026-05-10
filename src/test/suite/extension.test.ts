@@ -2285,6 +2285,7 @@ suite('extension activation', () => {
     let symbolProviderCalls = 0;
     let completeSnapshotPersisted = false;
     let resolveCompleteSnapshot: (() => void) | undefined;
+    let releaseCompleteSnapshotWrite: (() => void) | undefined;
     let releaseSymbolProviders: (() => void) | undefined;
     const completeSnapshotPromise = new Promise<void>((resolve) => {
       resolveCompleteSnapshot = resolve;
@@ -2376,6 +2377,9 @@ suite('extension activation', () => {
 
         completeSnapshotPersisted = true;
         resolveCompleteSnapshot?.();
+        return await new Promise<void>((resolve) => {
+          releaseCompleteSnapshotWrite = resolve;
+        });
       }) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
     );
     const fsPatch = patchProperty(vscode.workspace, 'fs', {
@@ -2399,8 +2403,10 @@ suite('extension activation', () => {
       ]);
 
       assert.equal(outcome, 'persisted');
-      assert.equal(symbolProviderCalls < files.length, true);
+      assert.equal(symbolProviderCalls, 0);
+      releaseCompleteSnapshotWrite?.();
     } finally {
+      releaseCompleteSnapshotWrite?.();
       releaseSymbolProviders?.();
       await waitFor(() => symbolProviderCalls === files.length, 'symbol provider calls to drain');
       restoreProperty(fsPatch);

@@ -36,9 +36,27 @@ export type PersistedWorkspaceSnapshot = {
 };
 
 export class PersistenceStore {
+  private readonly writeQueues = new Map<string, Promise<void>>();
+
   constructor(private readonly rootPath: string) {}
 
   async writeWorkspaceSnapshot(workspaceId: string, snapshot: PersistedWorkspaceSnapshot): Promise<void> {
+    const previousWrite = this.writeQueues.get(workspaceId) ?? Promise.resolve();
+    const currentWrite = previousWrite
+      .catch(() => undefined)
+      .then(() => this.writeWorkspaceSnapshotNow(workspaceId, snapshot));
+    this.writeQueues.set(workspaceId, currentWrite);
+
+    try {
+      await currentWrite;
+    } finally {
+      if (this.writeQueues.get(workspaceId) === currentWrite) {
+        this.writeQueues.delete(workspaceId);
+      }
+    }
+  }
+
+  private async writeWorkspaceSnapshotNow(workspaceId: string, snapshot: PersistedWorkspaceSnapshot): Promise<void> {
     const workspacePath = path.join(this.rootPath, workspaceId);
     await fs.mkdir(workspacePath, { recursive: true });
     await fs.writeFile(
