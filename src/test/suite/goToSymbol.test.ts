@@ -74,4 +74,45 @@ suite('goToSymbol', () => {
     assert.deepEqual(selectedPosition, new vscode.Position(4, 2));
     assert.equal(quickPick.disposed, true);
   });
+
+  test('labels completion results as partial while preserving existing details', async () => {
+    const index = new SymbolIndex();
+    const symbolUri = vscode.Uri.file('c:\\workspace\\src\\app\\main.ts');
+    index.replaceForFile('src/app/main.ts', [
+      {
+        name: 'MainGraphRenderer',
+        kind: vscode.SymbolKind.Class,
+        containerName: 'Graph',
+        uri: symbolUri.toString(),
+        startLine: 4,
+        startColumn: 2,
+        approximate: false
+      }
+    ]);
+
+    const quickPick = new FakeQuickPick<vscode.QuickPickItem>();
+    const pickerPatch = patchProperty(vscode.window, 'createQuickPick', ((() => quickPick) as unknown) as typeof vscode.window.createQuickPick);
+
+    try {
+      await goToSymbol(
+        index,
+        { completionStyleResults: true, fuzzySearch: true },
+        {},
+        { partialResultsMessage: 'Partial symbol index; background hydration is still running.' }
+      );
+
+      assert.equal(quickPick.showed, true);
+      assert.equal(quickPick.items.length, 1);
+      assert.equal(quickPick.items[0]?.label, 'MainGraphRenderer');
+      assert.equal(quickPick.items[0]?.description, 'Graph');
+      assert.equal(
+        quickPick.items[0]?.detail,
+        `${symbolUri.fsPath} \u00B7 Partial symbol index; background hydration is still running.`
+      );
+      assert.equal((quickPick.items[0]?.iconPath as vscode.ThemeIcon | undefined)?.id, 'circle-filled');
+    } finally {
+      restoreProperty(pickerPatch);
+    }
+  });
+
 });

@@ -17,3 +17,12 @@ export type PersistedLayerState = {
   availableLayers: IndexLayer[];
   activeLayer?: IndexLayer;
 };
+
+export type PersistedSymbolHydrationStatus = 'idle' | 'running' | 'complete' | 'paused';
+
+export type PersistedSymbolHydrationState = {
+  status: PersistedSymbolHydrationStatus;
+  completedPaths: string[];
+  failedPaths: string[];
+  timedOutPaths: string[];
+};

@@ -9,6 +9,7 @@ import { rebuildIndex } from './commands/rebuildIndex';
 import { goToSymbol } from './commands/goToSymbol';
 import { goToText } from './commands/goToText';
 import { readConfig, requiresRebuild } from './configuration';
+import { createIndexBenchmarkRecorder } from './core/indexBenchmarkRecorder';
 import { createIndexBuildPlan } from './core/indexBuildPlanner';
 import { hashContent } from './core/contentHash';
 import { IndexCoordinator, shouldYield } from './core/indexCoordinator';
@@ -18,6 +19,8 @@ import { createIgnoreMatcher, loadConfiguredIgnoreMatcher, type IgnoreMatcher } 
 import { buildMerkleTree, diffMerkleLeaves, type MerkleLeafRecord, type MerkleTreeSnapshot } from './core/merkleTree';
 import { toPersistedSubtreeHashes, type PersistedMerkleSnapshot } from './core/merkleSnapshot';
 import { PersistenceStore, type PersistedWorkspaceSnapshot } from './core/persistenceStore';
+import { createSymbolHydrationPlan, type SymbolHydrationPlanItem } from './core/symbolHydrationPlan';
+import { SymbolHydrationScheduler, type SymbolHydrationWorkerResult } from './core/symbolHydrationScheduler';
 import { shouldProcessUpdateJob, WORKSPACE_FILE_EXCLUDE_GLOB, type UpdateJob, type WatcherPathFilters } from './core/workspaceWatcher';
 import { FileIndex } from './indexes/fileIndex';
 import { SymbolIndex } from './indexes/symbolIndex';
@@ -33,12 +36,15 @@ const INITIAL_FILE_LAYER_WARMING_MESSAGE = 'Building initial file index. Please 
 const INITIAL_TEXT_LAYER_WARMING_MESSAGE = 'Building initial text index. Please wait a moment.';
 const INITIAL_SYMBOL_LAYER_WARMING_MESSAGE = 'Building initial symbol index. Please wait a moment.';
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
+const PARTIAL_SYMBOL_INDEX_MESSAGE = 'Partial symbol index; background hydration is still running.';
 const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
 const INDEX_BUILD_STATUS_PRIORITY = 100;
 const PERSISTENCE_SCHEMA_VERSION = 2;
 const TEXT_PHASE_CONCURRENCY = 8;
+const TEXT_HYDRATION_BATCH_SIZE = 100;
 const SYMBOL_PHASE_CONCURRENCY = 1;
+const SYMBOL_HYDRATION_BATCH_SIZE = 25;
 
 type IndexBuildKind = 'initial' | 'rebuild';
 
@@ -56,6 +62,13 @@ type BuildWorkspaceIndexesResult = {
   canPersistSnapshot: boolean;
   merkle?: MerkleTreeSnapshot;
 };
+
+type PersistCheckpoint = (
+  merkleSnapshot: MerkleTreeSnapshot,
+  activeLayer?: IndexLayer,
+  shouldPersist?: () => boolean
+) => Promise<void>;
+type InvalidateLayers = (layers: IndexLayer[]) => void;
 
 type IndexBuildProgress = {
   phase: 'discovering' | 'indexing';
@@ -83,6 +96,63 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Fast Symbol Indexer');
   const buildStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, INDEX_BUILD_STATUS_PRIORITY);
   const buildStatus = createIndexBuildStatusReporter(buildStatusItem);
+  const benchmarkRecorder = createIndexBenchmarkRecorder(process.env.FASTSEARCH_BENCHMARK_PATH);
+  const benchmarkStartedAt = Date.now();
+  let benchmarkedLayers = new Set<IndexLayer>();
+  let symbolHydrationCompleteBenchmarked = false;
+  const benchmarkElapsedMs = (): number => Date.now() - benchmarkStartedAt;
+  const flushBenchmark = (): void => {
+    if (!benchmarkRecorder.enabled) {
+      return;
+    }
+
+    void benchmarkRecorder.flush().catch((error) => {
+      output.appendLine(`Failed to write indexing benchmark events: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
+  const recordBenchmarkEvent = (event: 'fileReady' | 'textReady' | 'symbolUsable' | 'symbolComplete' | 'symbolBatch', count?: number): void => {
+    if (!benchmarkRecorder.enabled) {
+      return;
+    }
+
+    benchmarkRecorder.record({
+      event,
+      elapsedMs: benchmarkElapsedMs(),
+      ...(count === undefined ? {} : { count })
+    });
+    flushBenchmark();
+  };
+  const resetLayerBenchmarkEvents = (): void => {
+    benchmarkedLayers = new Set<IndexLayer>();
+    symbolHydrationCompleteBenchmarked = false;
+  };
+  const recordLayerBenchmarkEvent = (layer: IndexLayer): void => {
+    if (benchmarkedLayers.has(layer)) {
+      return;
+    }
+
+    benchmarkedLayers.add(layer);
+    if (layer === 'file') {
+      recordBenchmarkEvent('fileReady');
+      return;
+    }
+
+    if (layer === 'text') {
+      recordBenchmarkEvent('textReady');
+      return;
+    }
+
+    if (layer === 'symbol') {
+      recordBenchmarkEvent('symbolUsable');
+    }
+  };
+  const recordAvailableLayerBenchmarkEvents = (): void => {
+    for (const layer of ['file', 'text', 'symbol'] as const) {
+      if (hasLayer(layerAvailability, layer)) {
+        recordLayerBenchmarkEvent(layer);
+      }
+    }
+  };
   const getConfig = () => readConfig();
   const config = getConfig();
   const fileIndex = new FileIndex();
@@ -100,7 +170,54 @@ export function activate(context: vscode.ExtensionContext): void {
   let configuredIgnoreFilePaths = new Set<string>();
   let buildGeneration = 0;
   let workspaceMerkleState: MerkleTreeSnapshot | undefined;
+  let workspaceMerkleGeneration = 0;
+  let activeBuildMerkleState: MerkleTreeSnapshot | undefined;
+  let activeBuildMerkleGeneration = 0;
   let pendingUpdateJobs: UpdateJob[] = [];
+  let symbolHydrationScheduler: SymbolHydrationScheduler | undefined;
+  const clearActiveBuildMerkleState = (): void => {
+    activeBuildMerkleState = undefined;
+    activeBuildMerkleGeneration = 0;
+  };
+  const enqueueSymbolHydration = (items: SymbolHydrationPlanItem[], generation: number): void => {
+    const scheduler = symbolHydrationScheduler;
+    const recordSymbolHydrationComplete = (): void => {
+      if (
+        symbolHydrationCompleteBenchmarked
+        || generation !== buildGeneration
+        || !scheduler
+        || symbolHydrationScheduler !== scheduler
+        || !isSymbolHydrationComplete()
+      ) {
+        return;
+      }
+
+      symbolHydrationCompleteBenchmarked = true;
+      recordBenchmarkEvent('symbolComplete');
+    };
+
+    if (!scheduler) {
+      return;
+    }
+
+    if (items.length === 0) {
+      queueMicrotask(recordSymbolHydrationComplete);
+      return;
+    }
+
+    scheduler.enqueue(items, generation);
+    void scheduler.drain()
+      .then(() => {
+        recordSymbolHydrationComplete();
+      })
+      .catch((error) => {
+        output.appendLine(`Failed to hydrate workspace symbols: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  };
+  const resetSymbolHydrationScheduler = (): void => {
+    symbolHydrationScheduler?.cancel();
+    symbolHydrationScheduler = createWorkspaceSymbolHydrationScheduler();
+  };
   const refreshIgnoreMatcher = async (): Promise<IgnoreMatcher> => {
     const loadedIgnoreMatcher = await loadConfiguredIgnoreMatcher(
       vscode.workspace.fs,
@@ -121,6 +238,8 @@ export function activate(context: vscode.ExtensionContext): void {
     const buildKind = currentBuildKind;
     buildStatus.start(progressToken, buildKind);
     const generation = ++buildGeneration;
+    clearActiveBuildMerkleState();
+    resetSymbolHydrationScheduler();
 
     try {
       const currentConfig = getConfig();
@@ -141,12 +260,27 @@ export function activate(context: vscode.ExtensionContext): void {
         buildKind === 'initial' ? restoredSnapshot : undefined,
         (layer) => {
           layerAvailability = markLayerAvailable(layerAvailability, layer);
+          recordLayerBenchmarkEvent(layer);
           resolveLayerWaiters(layer);
         },
-        persistLayerCheckpoint
+        invalidateLayers,
+        persistLayerCheckpoint,
+        (merkle, merkleGeneration) => {
+          if (merkleGeneration === buildGeneration) {
+            activeBuildMerkleState = merkle;
+            activeBuildMerkleGeneration = merkleGeneration;
+          }
+        },
+        (merkle, merkleGeneration) =>
+          getConfig().enabled
+          && buildGeneration === merkleGeneration
+          && activeBuildMerkleGeneration === merkleGeneration
+          && activeBuildMerkleState === merkle,
+        enqueueSymbolHydration
       );
 
       workspaceMerkleState = completed.completed ? completed.merkle : undefined;
+      workspaceMerkleGeneration = completed.completed && completed.merkle ? generation : 0;
       if (completed.completed && getConfig().enabled && completed.canPersistSnapshot && completed.merkle) {
         await persistLayerCheckpoint(completed.merkle);
       }
@@ -158,15 +292,18 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   const coordinator = new IndexCoordinator({
     clearIndexes: () => {
+      resetSymbolHydrationScheduler();
       semanticService.cancelGeneration(buildGeneration);
       semanticService.clear();
       fileIndex.clear();
       symbolIndex.clear();
       textIndex.clear();
       semanticIndex.clear();
-      workspaceMerkleState = undefined;
-      pendingUpdateJobs = [];
-    },
+        workspaceMerkleState = undefined;
+        workspaceMerkleGeneration = 0;
+        clearActiveBuildMerkleState();
+        pendingUpdateJobs = [];
+      },
     clearPersistence: async () => persistenceStore.clearWorkspaceCache(workspacePersistence.workspaceId),
     buildWorkspace
   });
@@ -196,9 +333,21 @@ export function activate(context: vscode.ExtensionContext): void {
       resolveLayerWaiters(layer);
     }
   };
+  const invalidateLayers: InvalidateLayers = (layers): void => {
+    const unavailableLayers = new Set<IndexLayer>(layers);
+    const availableLayers = [...layerAvailability.availableLayers].filter((layer) => !unavailableLayers.has(layer));
+    const activeLayer = layerAvailability.activeLayer && !unavailableLayers.has(layerAvailability.activeLayer)
+      ? layerAvailability.activeLayer
+      : undefined;
+    layerAvailability = createLayerAvailability(availableLayers, activeLayer);
+  };
 
-  const persistLayerCheckpoint = async (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer): Promise<void> => {
-    if (!getConfig().enabled) {
+  const persistLayerCheckpoint = async (
+    merkleSnapshot: MerkleTreeSnapshot,
+    activeLayer?: IndexLayer,
+    shouldPersist = () => getConfig().enabled
+  ): Promise<void> => {
+    if (!shouldPersist()) {
       return;
     }
 
@@ -216,6 +365,7 @@ export function activate(context: vscode.ExtensionContext): void {
       )
     );
   };
+  symbolHydrationScheduler = createWorkspaceSymbolHydrationScheduler();
 
   const runQueuedRebuild = (): void => {
     if (initialFileIndexBuildPending || rebuildInFlight) {
@@ -329,6 +479,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     workspaceMerkleState = buildMerkleTree([...merkleLeaves.values()]);
+    workspaceMerkleGeneration = generation;
     await persistenceStore.writeWorkspaceSnapshot(
       workspacePersistence.workspaceId,
       createPersistedWorkspaceSnapshot(
@@ -366,6 +517,8 @@ export function activate(context: vscode.ExtensionContext): void {
     rebuildInFlight = true;
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
+    clearActiveBuildMerkleState();
+    resetSymbolHydrationScheduler();
     const generation = buildGeneration;
     const currentConfig = getConfig();
     semanticService = createSemanticService(semanticIndex, currentConfig, output);
@@ -478,6 +631,8 @@ export function activate(context: vscode.ExtensionContext): void {
     coordinator.markWarming();
     restoredSnapshotReady = false;
     layerAvailability = createLayerAvailability();
+    resetLayerBenchmarkEvents();
+    clearActiveBuildMerkleState();
     initialSnapshotRestorePending = true;
     initialSnapshotPromise = restorePersistedSnapshot(
       persistenceStore,
@@ -497,12 +652,14 @@ export function activate(context: vscode.ExtensionContext): void {
               snapshot.metadata.layerState?.activeLayer
             )
           : createLayerAvailability();
+        recordAvailableLayerBenchmarkEvents();
         restoredSnapshotReady = hasLayer(layerAvailability, 'file');
       })
       .catch((error) => {
         restoredSnapshot = undefined;
         restoredSnapshotReady = false;
         layerAvailability = createLayerAvailability();
+        resetLayerBenchmarkEvents();
         output.appendLine(`Failed to restore persisted workspace snapshot: ${error instanceof Error ? error.message : String(error)}`);
       })
       .finally(() => {
@@ -522,9 +679,13 @@ export function activate(context: vscode.ExtensionContext): void {
     pendingUpdateJobs = [];
     semanticService.cancelGeneration(buildGeneration);
     buildGeneration += 1;
+    clearActiveBuildMerkleState();
+    resetSymbolHydrationScheduler();
     semanticService = createSemanticService(semanticIndex, getConfig(), output);
     workspaceMerkleState = undefined;
+    workspaceMerkleGeneration = 0;
     layerAvailability = createLayerAvailability();
+    resetLayerBenchmarkEvents();
     coordinator.markStale();
     beginBuildGate(() => coordinator.rebuild());
   };
@@ -549,6 +710,11 @@ export function activate(context: vscode.ExtensionContext): void {
     if (initialSnapshotRestorePending) {
       await initialSnapshotPromise;
     }
+  };
+
+  const isSymbolHydrationComplete = (): boolean => {
+    const counts = symbolHydrationScheduler?.getStatusCounts();
+    return !counts || (counts.queued === 0 && counts.running === 0);
   };
 
   const waitForLayer = async (layer: IndexLayer): Promise<boolean> => {
@@ -683,7 +849,9 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await goToSymbol(symbolIndex, getConfig(), {}, {}, semanticIndex);
+    await goToSymbol(symbolIndex, getConfig(), {}, {
+      partialResultsMessage: isSymbolHydrationComplete() ? undefined : PARTIAL_SYMBOL_INDEX_MESSAGE
+    }, semanticIndex);
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.rebuildIndex', async () => {
@@ -716,11 +884,11 @@ export function activate(context: vscode.ExtensionContext): void {
       useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowFallback
           ? async () => {
-            if (initialFileIndexBuildPending) {
-              void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+            if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'text')) {
+              showLayerWarmingMessage('text');
             }
 
-            if (!await waitForCurrentBuild()) {
+            if (!await waitForLayer('text')) {
               void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
               return false;
             }
@@ -746,11 +914,11 @@ export function activate(context: vscode.ExtensionContext): void {
       useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowSymbolFallback
           ? async () => {
-            if (initialFileIndexBuildPending) {
-              void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+            if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'symbol')) {
+              showLayerWarmingMessage('symbol');
             }
 
-            if (!await waitForCurrentBuild()) {
+            if (!await waitForLayer('symbol')) {
               void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
               return false;
             }
@@ -796,6 +964,7 @@ export function activate(context: vscode.ExtensionContext): void {
           initialBuildToken += 1;
           semanticService.cancelGeneration(buildGeneration);
           buildGeneration += 1;
+          symbolHydrationScheduler?.cancel();
           semanticService.clear();
           rebuildQueued = false;
           rebuildInFlight = false;
@@ -805,6 +974,9 @@ export function activate(context: vscode.ExtensionContext): void {
           textIndex.clear();
           semanticIndex.clear();
           workspaceMerkleState = undefined;
+          workspaceMerkleGeneration = 0;
+          clearActiveBuildMerkleState();
+          resetLayerBenchmarkEvents();
           coordinator.markStale();
           initialFileIndexBuildPending = false;
           resolveAllLayerWaiters();
@@ -827,11 +999,71 @@ export function activate(context: vscode.ExtensionContext): void {
     output,
     {
       dispose: () => {
+        symbolHydrationScheduler?.cancel();
         semanticService.cancelGeneration(buildGeneration);
         semanticService.clear();
       }
     }
   );
+
+  function createWorkspaceSymbolHydrationScheduler(): SymbolHydrationScheduler {
+    return new SymbolHydrationScheduler({
+      concurrency: SYMBOL_PHASE_CONCURRENCY,
+      batchSize: SYMBOL_HYDRATION_BATCH_SIZE,
+      getGeneration: () => buildGeneration,
+      isCurrent: (item, generation) => isCurrentSymbolHydrationItem(item, generation),
+      worker: async (item, generation): Promise<SymbolHydrationWorkerResult> => {
+        const relativePath = normalizeWorkspaceMerklePath(item.relativePath);
+        const result = await refreshWorkspaceSymbolsOnly(
+          item.uri,
+          relativePath,
+          getConfig(),
+          generation,
+          output,
+          () => isCurrentSymbolHydrationItem(item, generation),
+          semanticService,
+          symbolIndex,
+          semanticIndex
+        );
+
+        if (result.aborted) {
+          return { status: 'skipped' };
+        }
+        if (result.symbolTimedOut) {
+          return { status: 'timedOut' };
+        }
+        if (result.failed) {
+          return { status: 'failed' };
+        }
+
+        return { status: 'hydrated' };
+      },
+      onBatchComplete: async (counts) => {
+        recordBenchmarkEvent('symbolBatch', counts.hydrated);
+        const expectedMerkle = workspaceMerkleState;
+        const expectedGeneration = workspaceMerkleGeneration;
+        if (expectedMerkle && expectedGeneration === buildGeneration) {
+          await persistLayerCheckpoint(expectedMerkle, undefined, () =>
+            getConfig().enabled
+            && workspaceMerkleGeneration === expectedGeneration
+            && buildGeneration === expectedGeneration
+            && workspaceMerkleState === expectedMerkle
+          );
+        }
+      }
+    });
+  }
+
+  function isCurrentSymbolHydrationItem(item: SymbolHydrationPlanItem, generation: number): boolean {
+    if (!getConfig().enabled || generation !== buildGeneration) {
+      return false;
+    }
+
+    const leaf = workspaceMerkleGeneration === generation
+      ? workspaceMerkleState?.leavesByPath.get(normalizeWorkspaceMerklePath(item.relativePath))
+      : undefined;
+    return !leaf || leaf.contentHash === item.contentHash;
+  }
 }
 
 function normalizeWorkspaceMerklePath(relativePath: string): string {
@@ -965,7 +1197,11 @@ async function refreshWorkspaceSymbolsOnly(
   semanticService: SemanticEnrichmentService,
   symbolIndex: SymbolIndex,
   semanticIndex: SemanticIndex
-): Promise<{ aborted: boolean; symbolTimedOut: boolean; }> {
+): Promise<{ aborted: boolean; symbolTimedOut: boolean; failed: boolean; }> {
+  if (!shouldContinue()) {
+    return { aborted: true, symbolTimedOut: false, failed: false };
+  }
+
   symbolIndex.removeForFile(relativePath);
   semanticIndex.removeForFile(relativePath);
 
@@ -973,7 +1209,7 @@ async function refreshWorkspaceSymbolsOnly(
   try {
     const symbolResult = await getDocumentSymbolsForBuild(file, config.symbolProviderTimeoutMs);
     if (!shouldContinue()) {
-      return { aborted: true, symbolTimedOut };
+      return { aborted: true, symbolTimedOut, failed: false };
     }
 
     if (symbolResult.timedOut) {
@@ -987,9 +1223,10 @@ async function refreshWorkspaceSymbolsOnly(
     }
   } catch (error) {
     output.appendLine(`Failed to read ${relativePath} for symbol indexing: ${error instanceof Error ? error.message : String(error)}`);
+    return { aborted: false, symbolTimedOut, failed: true };
   }
 
-  return { aborted: false, symbolTimedOut };
+  return { aborted: false, symbolTimedOut, failed: false };
 }
 
 async function buildCurrentWorkspaceMerkle(
@@ -1496,7 +1733,9 @@ async function buildCurrentWorkspaceMerkleFromCandidates(
   shouldContinue: () => boolean,
   buildStatus: IndexBuildStatusReporter,
   progressToken: number,
-  skippedFiles: number
+  skippedFiles: number,
+  onLeafRead?: (candidate: WorkspaceCandidate, leaf: WorkspaceMerkleEntry) => void,
+  onReadFailed?: () => void
 ): Promise<{ tree: MerkleTreeSnapshot; leavesByPath: Map<string, WorkspaceMerkleEntry>; } | undefined> {
   const leaves: WorkspaceMerkleEntry[] = [];
   let processedFiles = skippedFiles;
@@ -1525,12 +1764,16 @@ async function buildCurrentWorkspaceMerkleFromCandidates(
         return;
       }
       leaves.push(leaf);
+      onLeafRead?.(candidate, leaf);
     } catch (error) {
       output.appendLine(
         `Failed to read ${candidate.relativePath} for Merkle indexing: ${error instanceof Error ? error.message : String(error)}`
       );
       readFailed = true;
       stop = true;
+      if (shouldContinue()) {
+        onReadFailed?.();
+      }
       return;
     }
 
@@ -1578,13 +1821,18 @@ async function buildWorkspaceIndexesLayered(
   progressToken: number,
   previousSnapshot: PersistedWorkspaceSnapshot | undefined,
   markLayerReady: (layer: IndexLayer) => void,
-  persistCheckpoint: (merkleSnapshot: MerkleTreeSnapshot, activeLayer?: IndexLayer) => Promise<void>
+  invalidateLayers: InvalidateLayers,
+  persistCheckpoint: PersistCheckpoint,
+  setCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => void,
+  isCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => boolean,
+  enqueueSymbolHydration: (items: SymbolHydrationPlanItem[], generation: number) => void
 ): Promise<BuildWorkspaceIndexesResult> {
   try {
     if (config.include.length === 0) {
       markLayerReady('file');
       markLayerReady('text');
       markLayerReady('symbol');
+      enqueueSymbolHydration([], generation);
       return { completed: true, canPersistSnapshot: false };
     }
 
@@ -1605,7 +1853,44 @@ async function buildWorkspaceIndexesLayered(
     }).filePhase;
     const skippedFiles = files.length - sortedCandidates.length;
     const restoredFileLayer = canReuseSnapshotLayer(previousSnapshot, 'file');
+    const restoredTextLayer = canReuseSnapshotLayer(previousSnapshot, 'text');
+    const earlyTextHydratedPaths = new Set<string>();
+    let textLayerMarkedReady = restoredTextLayer;
+    let merkleReadFailed = false;
+    let readyTextCheckpointAttempted = false;
     let symbolTimeouts = 0;
+
+    const markTextLayerReady = (): boolean => {
+      if (textLayerMarkedReady || merkleReadFailed) {
+        return false;
+      }
+
+      textLayerMarkedReady = true;
+      markLayerReady('text');
+      return true;
+    };
+
+    const hydrateEarlyTextFromMerkleLeaf = (candidate: WorkspaceCandidate, leaf: WorkspaceMerkleEntry): void => {
+      if (merkleReadFailed || restoredTextLayer || textLayerMarkedReady || earlyTextHydratedPaths.size >= TEXT_HYDRATION_BATCH_SIZE || !shouldContinue()) {
+        return;
+      }
+
+      const normalizedPath = normalizeWorkspaceMerklePath(candidate.relativePath);
+      if (earlyTextHydratedPaths.has(normalizedPath)) {
+        return;
+      }
+
+      if (leaf.textContent === undefined) {
+        textIndex.removeForFile(candidate.relativePath);
+      } else {
+        textIndex.upsert(candidate.relativePath, candidate.uri.toString(), leaf.textContent);
+      }
+      earlyTextHydratedPaths.add(normalizedPath);
+
+      if (earlyTextHydratedPaths.size >= TEXT_HYDRATION_BATCH_SIZE) {
+        markTextLayerReady();
+      }
+    };
 
     pruneRestoredWorkspaceEntries(fileIndex, symbolIndex, textIndex, semanticIndex, sortedCandidates);
     buildStatus.setTotalFiles(progressToken, files.length);
@@ -1648,9 +1933,20 @@ async function buildWorkspaceIndexesLayered(
       shouldContinue,
       buildStatus,
       progressToken,
-      skippedFiles
+      skippedFiles,
+      hydrateEarlyTextFromMerkleLeaf,
+      () => {
+        merkleReadFailed = true;
+        textLayerMarkedReady = false;
+        invalidateLayers(['file', 'text', 'symbol']);
+      }
     );
     if (!currentMerkle) {
+      if (!shouldContinue()) {
+        return { completed: false, canPersistSnapshot: false };
+      }
+
+      invalidateLayers(['file', 'text', 'symbol']);
       const fallback = await buildWorkspaceIndexesFull(
         sortedCandidates.map((candidate) => candidate.uri),
         fileIndex,
@@ -1671,11 +1967,22 @@ async function buildWorkspaceIndexesLayered(
         markLayerReady('file');
         markLayerReady('text');
         markLayerReady('symbol');
+        enqueueSymbolHydration([], generation);
       }
       return fallback;
     }
 
-    await persistCheckpoint(currentMerkle.tree, 'text');
+    const expectedGeneration = generation;
+    const expectedMerkle = currentMerkle.tree;
+    setCurrentBuildMerkle(expectedMerkle, expectedGeneration);
+    const shouldPersistCurrentMerkle = () =>
+      shouldContinue()
+      && isCurrentBuildMerkle(expectedMerkle, expectedGeneration);
+
+    await persistCheckpoint(expectedMerkle, 'text', shouldPersistCurrentMerkle);
+    if (textLayerMarkedReady) {
+      readyTextCheckpointAttempted = true;
+    }
 
     const reuseHints = createReuseHintsFromSnapshot(previousSnapshot, currentMerkle);
     const plan = createIndexBuildPlan(sortedCandidates, reuseHints);
@@ -1688,8 +1995,29 @@ async function buildWorkspaceIndexesLayered(
         fileIndex.upsert(candidate.relativePath, candidate.uri.toString(), toIndexedFileKey(candidate.uri, candidate.relativePath));
       }
     }
+    if (!textLayerMarkedReady && reuseHints.text.size > 0 && plan.textPhase.length === 0) {
+      textLayerMarkedReady = true;
+    }
     let textPhaseProcessed = skippedFiles + reuseHints.text.size;
+    let textBatchProcessed = 0;
     let stopTextPhase = false;
+
+    const tryMarkTextReadyForBatch = (): boolean => {
+      if (textLayerMarkedReady || textBatchProcessed < TEXT_HYDRATION_BATCH_SIZE || !shouldContinue()) {
+        return false;
+      }
+
+      return markTextLayerReady();
+    };
+
+    const persistReadyTextCheckpoint = async (): Promise<void> => {
+      if (readyTextCheckpointAttempted) {
+        return;
+      }
+
+      readyTextCheckpointAttempted = true;
+      await persistCheckpoint(expectedMerkle, 'text', shouldPersistCurrentMerkle);
+    };
 
     buildStatus.advance(progressToken, {
       processedFiles: textPhaseProcessed,
@@ -1705,14 +2033,18 @@ async function buildWorkspaceIndexesLayered(
         return;
       }
 
-      const leaf = currentMerkle.leavesByPath.get(normalizeWorkspaceMerklePath(candidate.relativePath));
-      if (!leaf || leaf.textContent === undefined) {
-        textIndex.removeForFile(candidate.relativePath);
-      } else {
-        textIndex.upsert(candidate.relativePath, candidate.uri.toString(), leaf.textContent);
+      const normalizedPath = normalizeWorkspaceMerklePath(candidate.relativePath);
+      const leaf = currentMerkle.leavesByPath.get(normalizedPath);
+      if (!earlyTextHydratedPaths.has(normalizedPath)) {
+        if (!leaf || leaf.textContent === undefined) {
+          textIndex.removeForFile(candidate.relativePath);
+        } else {
+          textIndex.upsert(candidate.relativePath, candidate.uri.toString(), leaf.textContent);
+        }
       }
 
       textPhaseProcessed += 1;
+      textBatchProcessed += 1;
       buildStatus.advance(progressToken, {
         processedFiles: textPhaseProcessed,
         skippedFiles,
@@ -1720,6 +2052,9 @@ async function buildWorkspaceIndexesLayered(
         currentFile: candidate.relativePath,
         currentLayer: 'text'
       });
+      if (tryMarkTextReadyForBatch()) {
+        await persistReadyTextCheckpoint();
+      }
       if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, textPhaseProcessed - skippedFiles)) {
         await yieldToEventLoop();
       }
@@ -1729,69 +2064,53 @@ async function buildWorkspaceIndexesLayered(
       return { completed: false, canPersistSnapshot: false };
     }
 
-    markLayerReady('text');
+    if (!textLayerMarkedReady) {
+      markTextLayerReady();
+    }
+    for (const candidate of plan.symbolPhase) {
+      symbolIndex.removeForFile(candidate.relativePath);
+      semanticIndex.removeForFile(candidate.relativePath);
+    }
     await persistCheckpoint(currentMerkle.tree, 'symbol');
 
-    let symbolPhaseProcessed = skippedFiles + reuseHints.symbol.size;
-    let stopSymbolPhase = false;
     buildStatus.advance(progressToken, {
-      processedFiles: symbolPhaseProcessed,
+      processedFiles: files.length,
       skippedFiles,
       symbolTimeouts,
       currentFile: undefined,
       currentLayer: 'symbol'
     });
 
-    await runPhaseJobs(plan.symbolPhase, SYMBOL_PHASE_CONCURRENCY, async (candidate) => {
-      if (stopSymbolPhase || !shouldContinue()) {
-        stopSymbolPhase = true;
-        return;
-      }
-
+    const symbolHydrationCandidates = [];
+    for (const candidate of plan.symbolPhase) {
       const leaf = currentMerkle.leavesByPath.get(normalizeWorkspaceMerklePath(candidate.relativePath));
       if (!leaf) {
-        symbolIndex.removeForFile(candidate.relativePath);
-        semanticIndex.removeForFile(candidate.relativePath);
-      } else {
-        const result = await refreshWorkspaceSymbolsOnly(
-          candidate.uri,
-          candidate.relativePath,
-          config,
-          generation,
-          output,
-          shouldContinue,
-          semanticService,
-          symbolIndex,
-          semanticIndex
-        );
-
-        if (result.aborted) {
-          stopSymbolPhase = true;
-          return;
-        }
-
-        if (result.symbolTimedOut) {
-          symbolTimeouts += 1;
-        }
+        continue;
       }
 
-      symbolPhaseProcessed += 1;
-      buildStatus.advance(progressToken, {
-        processedFiles: symbolPhaseProcessed,
-        skippedFiles,
-        symbolTimeouts,
-        currentFile: candidate.relativePath,
-        currentLayer: 'symbol'
+      symbolHydrationCandidates.push({
+        uri: candidate.uri,
+        relativePath: candidate.relativePath,
+        contentHash: leaf.contentHash
       });
-      if (shouldYield(INDEX_BUILD_YIELD_INTERVAL, symbolPhaseProcessed - skippedFiles)) {
-        await yieldToEventLoop();
-      }
-    });
+    }
 
-    if (stopSymbolPhase || !shouldContinue()) {
+    if (!shouldContinue()) {
       return { completed: false, canPersistSnapshot: false };
     }
 
+    const openPaths = new Set(
+      vscode.window.visibleTextEditors.map((editor) => normalizeWorkspaceMerklePath(vscode.workspace.asRelativePath(editor.document.uri, true)))
+    );
+    const changedPaths = new Set(
+      [...plan.filePhase, ...plan.textPhase].map((candidate) => normalizeWorkspaceMerklePath(candidate.relativePath))
+    );
+    const symbolHydrationPlan = createSymbolHydrationPlan(symbolHydrationCandidates, {
+      openPaths,
+      changedPaths,
+      hydratedPaths: reuseHints.symbol
+    });
+    enqueueSymbolHydration(symbolHydrationPlan.items, generation);
     markLayerReady('symbol');
     return {
       completed: true,

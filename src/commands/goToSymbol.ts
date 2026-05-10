@@ -13,6 +13,7 @@ type CommandSearchPresentation = {
   onDidHide?: () => void;
   debugLog?: (message: string) => void;
   activeContextKey?: string;
+  partialResultsMessage?: string;
 };
 
 type CommandSearchDependencies = {
@@ -60,7 +61,7 @@ export async function goToSymbol(
     toItem: (candidate) => withCommandSearchProvenanceIcon(candidate, {
       label: candidate.label,
       description: candidate.description,
-      detail: candidate.detail
+      detail: withPartialResultsMessage(candidate.detail, presentation.partialResultsMessage)
     }),
     onDidAccept: async (candidate) => {
       try {
@@ -75,4 +76,12 @@ export async function goToSymbol(
     },
     onDidHide: presentation.onDidHide
   });
+}
+
+function withPartialResultsMessage(detail: string | undefined, partialResultsMessage: string | undefined): string | undefined {
+  if (!partialResultsMessage) {
+    return detail;
+  }
+
+  return detail ? `${detail} \u00B7 ${partialResultsMessage}` : partialResultsMessage;
 }
