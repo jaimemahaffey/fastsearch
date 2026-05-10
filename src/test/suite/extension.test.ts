@@ -1444,6 +1444,7 @@ suite('extension activation', () => {
       await waitFor(() => registeredCommands.has('fastIndexer.goToText'), 'goToText command registration');
       await commandStarted;
       await goToTextPromise;
+      await waitFor(() => readyTextCheckpointBlocked, 'ready text checkpoint after Merkle completion');
 
       assert.equal(readyTextCheckpointBlocked, true);
       assert.equal(readyTextCheckpointWrites, 1);
@@ -1463,6 +1464,166 @@ suite('extension activation', () => {
       assert.equal(readyTextCheckpointWrites, 1);
     } finally {
       releaseReadyTextCheckpoint?.();
+      restoreProperty(textUpsertPatch);
+      restoreProperty(executePatch);
+      restoreProperty(fsPatch);
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(quickPickPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(configPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+    }
+  });
+
+  test('go to text is usable while the merkle content pass is still reading later files', async () => {
+    const workspaceRoot = 'c:\\workspace';
+    const workspaceUri = vscode.Uri.file(workspaceRoot);
+    const expectedTextHydrationBatchSize = 100;
+    const fileCount = 160;
+    const files = Array.from({ length: fileCount }, (_, index) =>
+      vscode.Uri.file(path.join(workspaceRoot, 'src', `merkle-batch-${String(index).padStart(4, '0')}.ts`))
+    );
+    const blockedFile = files[fileCount - 1]!;
+    const fileContents = Object.fromEntries(
+      files.map((file, index) => [
+        file.fsPath,
+        `export const merkleBatch${index} = "merkleNeedle ${index}";\n`
+      ])
+    );
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    const quickPicks: Array<FakeQuickPick<vscode.QuickPickItem & { description?: string; }>> = [];
+    const originalTextUpsert = TextIndex.prototype.upsert;
+    const originalWorkspaceFs = vscode.workspace.fs;
+    const fsStub = createWorkspaceFsStub(fileContents);
+    let textUpsertCount = 0;
+    let goToTextPromise: Promise<unknown> | undefined;
+    let releaseCommandStarted: (() => void) | undefined;
+    const commandStarted = new Promise<void>((resolve) => {
+      releaseCommandStarted = resolve;
+    });
+    let releaseBlockedRead: (() => void) | undefined;
+    let blockedReadStarted = false;
+    let blockedReadReleased = false;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => registeredCommands.delete(command));
+    }) as typeof vscode.commands.registerCommand);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => files) as typeof vscode.workspace.findFiles);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true,
+            completionStyleResults: true,
+            useRipgrep: false,
+            semanticEnrichment: false
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      return typeof pathOrUri === 'string'
+        ? pathOrUri
+        : path.relative(workspaceRoot, pathOrUri.fsPath).replace(/\\/g, '/');
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', (((_uri: vscode.Uri) => ({
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    })) as unknown) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const quickPickPatch = patchProperty(vscode.window, 'createQuickPick', ((() => {
+      const quickPick = new FakeQuickPick<vscode.QuickPickItem & { description?: string; }>();
+      quickPicks.push(quickPick);
+      return quickPick;
+    }) as unknown) as typeof vscode.window.createQuickPick);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+    const fsPatch = patchProperty(vscode.workspace, 'fs', {
+      ...originalWorkspaceFs,
+      stat: fsStub.stat,
+      readFile: async (uri: vscode.Uri) => {
+        if (normalizeWorkspaceFsTestPath(uri.fsPath) === normalizeWorkspaceFsTestPath(blockedFile.fsPath)) {
+          blockedReadStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseBlockedRead = resolve;
+          });
+          blockedReadReleased = true;
+        }
+
+        return fsStub.readFile(uri);
+      }
+    } as typeof vscode.workspace.fs);
+    const executePatch = patchProperty(vscode.commands, 'executeCommand', (async () => []) as typeof vscode.commands.executeCommand);
+    const textUpsertPatch = patchProperty(TextIndex.prototype, 'upsert', function (this: TextIndex, relativePath: string, uri: string, content: string) {
+      textUpsertCount += 1;
+      const result = originalTextUpsert.call(this, relativePath, uri, content);
+      if (textUpsertCount === expectedTextHydrationBatchSize && !goToTextPromise) {
+        goToTextPromise = Promise.resolve(registeredCommands.get('fastIndexer.goToText')?.());
+        releaseCommandStarted?.();
+      }
+      return result;
+    } as typeof TextIndex.prototype.upsert);
+
+    try {
+      activate({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+      await waitFor(() => registeredCommands.has('fastIndexer.goToText'), 'goToText command registration');
+      await waitFor(() => blockedReadStarted, 'blocked merkle read to start');
+      await commandStarted;
+      await goToTextPromise;
+
+      assert.equal(blockedReadReleased, false);
+      assert.ok(textUpsertCount < fileCount, `expected text command before all Merkle reads completed, processed ${textUpsertCount}`);
+      assert.equal(quickPicks.length, 1);
+      assert.equal(quickPicks[0]?.showed, true);
+
+      const itemsUpdated = quickPicks[0]!.waitForItemsUpdate();
+      quickPicks[0]!.fireChangeValue('merkleNeedle');
+      await itemsUpdated;
+      assert.ok(quickPicks[0]!.items.length > 0);
+    } finally {
+      releaseBlockedRead?.();
       restoreProperty(textUpsertPatch);
       restoreProperty(executePatch);
       restoreProperty(fsPatch);

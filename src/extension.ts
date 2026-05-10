@@ -1723,7 +1723,8 @@ async function buildCurrentWorkspaceMerkleFromCandidates(
   shouldContinue: () => boolean,
   buildStatus: IndexBuildStatusReporter,
   progressToken: number,
-  skippedFiles: number
+  skippedFiles: number,
+  onLeafRead?: (candidate: WorkspaceCandidate, leaf: WorkspaceMerkleEntry) => void
 ): Promise<{ tree: MerkleTreeSnapshot; leavesByPath: Map<string, WorkspaceMerkleEntry>; } | undefined> {
   const leaves: WorkspaceMerkleEntry[] = [];
   let processedFiles = skippedFiles;
@@ -1752,6 +1753,7 @@ async function buildCurrentWorkspaceMerkleFromCandidates(
         return;
       }
       leaves.push(leaf);
+      onLeafRead?.(candidate, leaf);
     } catch (error) {
       output.appendLine(
         `Failed to read ${candidate.relativePath} for Merkle indexing: ${error instanceof Error ? error.message : String(error)}`
@@ -1837,7 +1839,42 @@ async function buildWorkspaceIndexesLayered(
     const skippedFiles = files.length - sortedCandidates.length;
     const restoredFileLayer = canReuseSnapshotLayer(previousSnapshot, 'file');
     const restoredTextLayer = canReuseSnapshotLayer(previousSnapshot, 'text');
+    const earlyTextHydratedPaths = new Set<string>();
+    let textLayerMarkedReady = restoredTextLayer;
+    let readyTextCheckpointAttempted = false;
     let symbolTimeouts = 0;
+
+    const markTextLayerReady = (): boolean => {
+      if (textLayerMarkedReady) {
+        return false;
+      }
+
+      textLayerMarkedReady = true;
+      markLayerReady('text');
+      return true;
+    };
+
+    const hydrateEarlyTextFromMerkleLeaf = (candidate: WorkspaceCandidate, leaf: WorkspaceMerkleEntry): void => {
+      if (restoredTextLayer || textLayerMarkedReady || earlyTextHydratedPaths.size >= TEXT_HYDRATION_BATCH_SIZE || !shouldContinue()) {
+        return;
+      }
+
+      const normalizedPath = normalizeWorkspaceMerklePath(candidate.relativePath);
+      if (earlyTextHydratedPaths.has(normalizedPath)) {
+        return;
+      }
+
+      if (leaf.textContent === undefined) {
+        textIndex.removeForFile(candidate.relativePath);
+      } else {
+        textIndex.upsert(candidate.relativePath, candidate.uri.toString(), leaf.textContent);
+      }
+      earlyTextHydratedPaths.add(normalizedPath);
+
+      if (earlyTextHydratedPaths.size >= TEXT_HYDRATION_BATCH_SIZE) {
+        markTextLayerReady();
+      }
+    };
 
     pruneRestoredWorkspaceEntries(fileIndex, symbolIndex, textIndex, semanticIndex, sortedCandidates);
     buildStatus.setTotalFiles(progressToken, files.length);
@@ -1880,7 +1917,8 @@ async function buildWorkspaceIndexesLayered(
       shouldContinue,
       buildStatus,
       progressToken,
-      skippedFiles
+      skippedFiles,
+      hydrateEarlyTextFromMerkleLeaf
     );
     if (!currentMerkle) {
       const fallback = await buildWorkspaceIndexesFull(
@@ -1916,6 +1954,9 @@ async function buildWorkspaceIndexesLayered(
       && isCurrentBuildMerkle(expectedMerkle, expectedGeneration);
 
     await persistCheckpoint(expectedMerkle, 'text', shouldPersistCurrentMerkle);
+    if (textLayerMarkedReady) {
+      readyTextCheckpointAttempted = true;
+    }
 
     const reuseHints = createReuseHintsFromSnapshot(previousSnapshot, currentMerkle);
     const plan = createIndexBuildPlan(sortedCandidates, reuseHints);
@@ -1928,21 +1969,12 @@ async function buildWorkspaceIndexesLayered(
         fileIndex.upsert(candidate.relativePath, candidate.uri.toString(), toIndexedFileKey(candidate.uri, candidate.relativePath));
       }
     }
+    if (!textLayerMarkedReady && reuseHints.text.size > 0 && plan.textPhase.length === 0) {
+      textLayerMarkedReady = true;
+    }
     let textPhaseProcessed = skippedFiles + reuseHints.text.size;
     let textBatchProcessed = 0;
-    let textLayerMarkedReady = restoredTextLayer || (reuseHints.text.size > 0 && plan.textPhase.length === 0);
-    let readyTextCheckpointAttempted = false;
     let stopTextPhase = false;
-
-    const markTextLayerReady = (): boolean => {
-      if (textLayerMarkedReady) {
-        return false;
-      }
-
-      textLayerMarkedReady = true;
-      markLayerReady('text');
-      return true;
-    };
 
     const tryMarkTextReadyForBatch = (): boolean => {
       if (textLayerMarkedReady || textBatchProcessed < TEXT_HYDRATION_BATCH_SIZE || !shouldContinue()) {
@@ -1975,11 +2007,14 @@ async function buildWorkspaceIndexesLayered(
         return;
       }
 
-      const leaf = currentMerkle.leavesByPath.get(normalizeWorkspaceMerklePath(candidate.relativePath));
-      if (!leaf || leaf.textContent === undefined) {
-        textIndex.removeForFile(candidate.relativePath);
-      } else {
-        textIndex.upsert(candidate.relativePath, candidate.uri.toString(), leaf.textContent);
+      const normalizedPath = normalizeWorkspaceMerklePath(candidate.relativePath);
+      const leaf = currentMerkle.leavesByPath.get(normalizedPath);
+      if (!earlyTextHydratedPaths.has(normalizedPath)) {
+        if (!leaf || leaf.textContent === undefined) {
+          textIndex.removeForFile(candidate.relativePath);
+        } else {
+          textIndex.upsert(candidate.relativePath, candidate.uri.toString(), leaf.textContent);
+        }
       }
 
       textPhaseProcessed += 1;
