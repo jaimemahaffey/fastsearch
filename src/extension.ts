@@ -35,6 +35,7 @@ const INITIAL_FILE_LAYER_WARMING_MESSAGE = 'Building initial file index. Please 
 const INITIAL_TEXT_LAYER_WARMING_MESSAGE = 'Building initial text index. Please wait a moment.';
 const INITIAL_SYMBOL_LAYER_WARMING_MESSAGE = 'Building initial symbol index. Please wait a moment.';
 const INITIAL_INDEX_REBUILD_BLOCKED_MESSAGE = 'Initial index build is still running. Please wait for it to finish before rebuilding.';
+const PARTIAL_SYMBOL_INDEX_MESSAGE = 'Partial symbol index; background hydration is still running.';
 const INDEXING_DISABLED_MESSAGE = 'Fast Symbol Indexer indexing is disabled.';
 const INDEX_BUILD_YIELD_INTERVAL = 50;
 const INDEX_BUILD_STATUS_PRIORITY = 100;
@@ -584,6 +585,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  const isSymbolHydrationComplete = (): boolean => {
+    const counts = symbolHydrationScheduler?.getStatusCounts();
+    return !counts || (counts.queued === 0 && counts.running === 0);
+  };
+
   const waitForLayer = async (layer: IndexLayer): Promise<boolean> => {
     await waitForInitialSnapshotRestore();
 
@@ -716,7 +722,9 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    await goToSymbol(symbolIndex, getConfig(), {}, {}, semanticIndex);
+    await goToSymbol(symbolIndex, getConfig(), {}, {
+      partialResultsMessage: isSymbolHydrationComplete() ? undefined : PARTIAL_SYMBOL_INDEX_MESSAGE
+    }, semanticIndex);
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('fastIndexer.rebuildIndex', async () => {
@@ -749,11 +757,11 @@ export function activate(context: vscode.ExtensionContext): void {
       useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowFallback
           ? async () => {
-            if (initialFileIndexBuildPending) {
-              void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+            if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'text')) {
+              showLayerWarmingMessage('text');
             }
 
-            if (!await waitForCurrentBuild()) {
+            if (!await waitForLayer('text')) {
               void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
               return false;
             }
@@ -779,11 +787,11 @@ export function activate(context: vscode.ExtensionContext): void {
       useFzf: currentConfig.useFzf,
       awaitFallbackReady: allowSymbolFallback
           ? async () => {
-            if (initialFileIndexBuildPending) {
-              void vscode.window.showInformationMessage(INITIAL_INDEXES_WARMING_MESSAGE);
+            if (initialFileIndexBuildPending && !hasLayer(layerAvailability, 'symbol')) {
+              showLayerWarmingMessage('symbol');
             }
 
-            if (!await waitForCurrentBuild()) {
+            if (!await waitForLayer('symbol')) {
               void vscode.window.showInformationMessage(INDEXING_DISABLED_MESSAGE);
               return false;
             }
