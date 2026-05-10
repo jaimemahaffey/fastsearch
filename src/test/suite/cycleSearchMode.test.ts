@@ -14,6 +14,21 @@ type CycleHarnessOptions = {
   symbolsAvailable?: boolean;
 };
 
+function toCyclePersistenceConfigHash(): string {
+  return JSON.stringify({
+    include: ['**/*'],
+    exclude: [],
+    ignoreFiles: [],
+    sharedIgnoreFiles: [],
+    ignoreInputs: [],
+    maxFileSizeKb: 512,
+    semanticEnrichment: true,
+    semanticConcurrency: 2,
+    semanticTimeoutMs: 750,
+    symbolProviderTimeoutMs: 3000
+  });
+}
+
 async function activateWithCycleHarness(
   quickPicks: Array<FakeQuickPick<vscode.QuickPickItem & { candidate?: unknown; }>>,
   options: CycleHarnessOptions = {}
@@ -89,6 +104,11 @@ async function activateWithCycleHarness(
     patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
       return typeof pathOrUri === 'string' ? pathOrUri : 'src/app/main.ts';
     }) as typeof vscode.workspace.asRelativePath),
+    patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }]),
     patchProperty(vscode.workspace, 'getWorkspaceFolder', ((uri: vscode.Uri) => ({
       uri: workspaceUri,
       index: 0,
@@ -108,14 +128,10 @@ async function activateWithCycleHarness(
       'readWorkspaceSnapshot',
       (async () => ({
         metadata: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           workspaceId: encodeURIComponent(workspaceUri.toString()),
-          configHash: JSON.stringify({
-            include: ['**/*'],
-            exclude: [],
-            maxFileSizeKb: 512
-          })
-                },
+          configHash: toCyclePersistenceConfigHash()
+        },
         merkle: {
           rootHash: '',
           subtreeHashes: [],
