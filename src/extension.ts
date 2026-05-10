@@ -98,6 +98,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const benchmarkRecorder = createIndexBenchmarkRecorder(process.env.FASTSEARCH_BENCHMARK_PATH);
   const benchmarkStartedAt = Date.now();
   let benchmarkedLayers = new Set<IndexLayer>();
+  let symbolHydrationCompleteBenchmarked = false;
   const benchmarkElapsedMs = (): number => Date.now() - benchmarkStartedAt;
   const flushBenchmark = (): void => {
     if (!benchmarkRecorder.enabled) {
@@ -122,6 +123,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   const resetLayerBenchmarkEvents = (): void => {
     benchmarkedLayers = new Set<IndexLayer>();
+    symbolHydrationCompleteBenchmarked = false;
   };
   const recordLayerBenchmarkEvent = (layer: IndexLayer): void => {
     if (benchmarkedLayers.has(layer)) {
@@ -141,9 +143,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
     if (layer === 'symbol') {
       recordBenchmarkEvent('symbolUsable');
-      if (isSymbolHydrationComplete()) {
-        recordBenchmarkEvent('symbolComplete');
-      }
     }
   };
   const recordAvailableLayerBenchmarkEvents = (): void => {
@@ -180,17 +179,35 @@ export function activate(context: vscode.ExtensionContext): void {
     activeBuildMerkleGeneration = 0;
   };
   const enqueueSymbolHydration = (items: SymbolHydrationPlanItem[], generation: number): void => {
-    if (items.length === 0 || !symbolHydrationScheduler) {
+    const scheduler = symbolHydrationScheduler;
+    const recordSymbolHydrationComplete = (): void => {
+      if (
+        symbolHydrationCompleteBenchmarked
+        || generation !== buildGeneration
+        || !scheduler
+        || symbolHydrationScheduler !== scheduler
+        || !isSymbolHydrationComplete()
+      ) {
+        return;
+      }
+
+      symbolHydrationCompleteBenchmarked = true;
+      recordBenchmarkEvent('symbolComplete');
+    };
+
+    if (!scheduler) {
       return;
     }
 
-    const scheduler = symbolHydrationScheduler;
-    symbolHydrationScheduler.enqueue(items, generation);
+    if (items.length === 0) {
+      queueMicrotask(recordSymbolHydrationComplete);
+      return;
+    }
+
+    scheduler.enqueue(items, generation);
     void scheduler.drain()
       .then(() => {
-        if (generation === buildGeneration && symbolHydrationScheduler === scheduler && isSymbolHydrationComplete()) {
-          recordBenchmarkEvent('symbolComplete');
-        }
+        recordSymbolHydrationComplete();
       })
       .catch((error) => {
         output.appendLine(`Failed to hydrate workspace symbols: ${error instanceof Error ? error.message : String(error)}`);
