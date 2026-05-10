@@ -68,6 +68,7 @@ type PersistCheckpoint = (
   activeLayer?: IndexLayer,
   shouldPersist?: () => boolean
 ) => Promise<void>;
+type InvalidateLayers = (layers: IndexLayer[]) => void;
 
 type IndexBuildProgress = {
   phase: 'discovering' | 'indexing';
@@ -262,6 +263,7 @@ export function activate(context: vscode.ExtensionContext): void {
           recordLayerBenchmarkEvent(layer);
           resolveLayerWaiters(layer);
         },
+        invalidateLayers,
         persistLayerCheckpoint,
         (merkle, merkleGeneration) => {
           if (merkleGeneration === buildGeneration) {
@@ -330,6 +332,14 @@ export function activate(context: vscode.ExtensionContext): void {
     for (const layer of [...layerWaiters.keys()]) {
       resolveLayerWaiters(layer);
     }
+  };
+  const invalidateLayers: InvalidateLayers = (layers): void => {
+    const unavailableLayers = new Set<IndexLayer>(layers);
+    const availableLayers = [...layerAvailability.availableLayers].filter((layer) => !unavailableLayers.has(layer));
+    const activeLayer = layerAvailability.activeLayer && !unavailableLayers.has(layerAvailability.activeLayer)
+      ? layerAvailability.activeLayer
+      : undefined;
+    layerAvailability = createLayerAvailability(availableLayers, activeLayer);
   };
 
   const persistLayerCheckpoint = async (
@@ -1807,6 +1817,7 @@ async function buildWorkspaceIndexesLayered(
   progressToken: number,
   previousSnapshot: PersistedWorkspaceSnapshot | undefined,
   markLayerReady: (layer: IndexLayer) => void,
+  invalidateLayers: InvalidateLayers,
   persistCheckpoint: PersistCheckpoint,
   setCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => void,
   isCurrentBuildMerkle: (merkleSnapshot: MerkleTreeSnapshot, generation: number) => boolean,
@@ -1921,6 +1932,7 @@ async function buildWorkspaceIndexesLayered(
       hydrateEarlyTextFromMerkleLeaf
     );
     if (!currentMerkle) {
+      invalidateLayers(['file', 'text', 'symbol']);
       const fallback = await buildWorkspaceIndexesFull(
         sortedCandidates.map((candidate) => candidate.uri),
         fileIndex,

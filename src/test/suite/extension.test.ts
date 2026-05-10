@@ -1642,6 +1642,172 @@ suite('extension activation', () => {
     }
   });
 
+  test('go to text waits for fallback rebuild after early text readiness is invalidated by merkle failure', async () => {
+    const workspaceRoot = 'c:\\workspace';
+    const workspaceUri = vscode.Uri.file(workspaceRoot);
+    const expectedTextHydrationBatchSize = 100;
+    const fileCount = 160;
+    const files = Array.from({ length: fileCount }, (_, index) =>
+      vscode.Uri.file(path.join(workspaceRoot, 'src', `fallback-batch-${String(index).padStart(4, '0')}.ts`))
+    );
+    const failingMerkleFile = files[expectedTextHydrationBatchSize + 5]!;
+    const blockedFallbackFile = files[0]!;
+    const fileContents = Object.fromEntries(
+      files.map((file, index) => [
+        file.fsPath,
+        `export const fallbackBatch${index} = "fallbackNeedle ${index}";\n`
+      ])
+    );
+    const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+    const infoMessages: string[] = [];
+    const quickPicks: Array<FakeQuickPick<vscode.QuickPickItem & { description?: string; }>> = [];
+    const originalTextClear = TextIndex.prototype.clear;
+    const originalWorkspaceFs = vscode.workspace.fs;
+    const fsStub = createWorkspaceFsStub(fileContents);
+    let merkleFailureThrown = false;
+    let fallbackTextCleared = false;
+    let blockedFallbackReadStarted = false;
+    let releaseBlockedFallbackRead: (() => void) | undefined;
+
+    const outputPatch = patchProperty(vscode.window, 'createOutputChannel', ((() => ({
+      appendLine: () => undefined,
+      dispose: () => undefined,
+      name: 'Fast Symbol Indexer',
+      append: () => undefined,
+      clear: () => undefined,
+      hide: () => undefined,
+      replace: () => undefined,
+      show: () => undefined
+    })) as unknown) as typeof vscode.window.createOutputChannel);
+    const registerPatch = patchProperty(vscode.commands, 'registerCommand', ((command: string, callback: (...args: unknown[]) => unknown) => {
+      registeredCommands.set(command, callback);
+      return new vscode.Disposable(() => registeredCommands.delete(command));
+    }) as typeof vscode.commands.registerCommand);
+    const infoPatch = patchProperty(vscode.window, 'showInformationMessage', (async (message: string) => {
+      infoMessages.push(message);
+      return undefined;
+    }) as typeof vscode.window.showInformationMessage);
+    const quickPickPatch = patchProperty(vscode.window, 'createQuickPick', ((() => {
+      const quickPick = new FakeQuickPick<vscode.QuickPickItem & { description?: string; }>();
+      quickPicks.push(quickPick);
+      return quickPick;
+    }) as unknown) as typeof vscode.window.createQuickPick);
+    const findFilesPatch = patchProperty(vscode.workspace, 'findFiles', (async () => files) as typeof vscode.workspace.findFiles);
+    const configPatch = patchProperty(vscode.workspace, 'getConfiguration', (((section?: string) => {
+      assert.equal(section, 'fastIndexer');
+      return {
+        get: <T>(key: string, defaultValue: T) => {
+          const values: Record<string, unknown> = {
+            enabled: true,
+            completionStyleResults: true,
+            useRipgrep: false,
+            semanticEnrichment: false
+          };
+          return (values[key] ?? defaultValue) as T;
+        }
+      };
+    }) as unknown) as typeof vscode.workspace.getConfiguration);
+    const relativePatch = patchProperty(vscode.workspace, 'asRelativePath', ((pathOrUri: string | vscode.Uri) => {
+      return typeof pathOrUri === 'string'
+        ? pathOrUri
+        : path.relative(workspaceRoot, pathOrUri.fsPath).replace(/\\/g, '/');
+    }) as typeof vscode.workspace.asRelativePath);
+    const workspaceFolderPatch = patchProperty(vscode.workspace, 'getWorkspaceFolder', (((_uri: vscode.Uri) => ({
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    })) as unknown) as typeof vscode.workspace.getWorkspaceFolder);
+    const workspaceFoldersPatch = patchProperty(vscode.workspace, 'workspaceFolders', [{
+      uri: workspaceUri,
+      index: 0,
+      name: 'workspace'
+    }] as typeof vscode.workspace.workspaceFolders);
+    const watcherPatch = patchProperty(vscode.workspace, 'createFileSystemWatcher', (((_globPattern: vscode.GlobPattern) => ({
+      onDidCreate: () => new vscode.Disposable(() => undefined),
+      onDidChange: () => new vscode.Disposable(() => undefined),
+      onDidDelete: () => new vscode.Disposable(() => undefined),
+      dispose: () => undefined
+    })) as unknown) as typeof vscode.workspace.createFileSystemWatcher);
+    const configListenerPatch = patchProperty(vscode.workspace, 'onDidChangeConfiguration', (((_listener: (event: vscode.ConfigurationChangeEvent) => unknown) => {
+      return new vscode.Disposable(() => undefined);
+    }) as unknown) as typeof vscode.workspace.onDidChangeConfiguration);
+    const persistenceReadPatch = patchProperty(
+      PersistenceStore.prototype,
+      'readWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.readWorkspaceSnapshot
+    );
+    const persistenceWritePatch = patchProperty(
+      PersistenceStore.prototype,
+      'writeWorkspaceSnapshot',
+      (async () => undefined) as typeof PersistenceStore.prototype.writeWorkspaceSnapshot
+    );
+    const fsPatch = patchProperty(vscode.workspace, 'fs', {
+      ...originalWorkspaceFs,
+      stat: fsStub.stat,
+      readFile: async (uri: vscode.Uri) => {
+        const normalizedPath = normalizeWorkspaceFsTestPath(uri.fsPath);
+        if (!fallbackTextCleared && !merkleFailureThrown && normalizedPath === normalizeWorkspaceFsTestPath(failingMerkleFile.fsPath)) {
+          merkleFailureThrown = true;
+          throw new Error('late merkle read failure');
+        }
+
+        if (fallbackTextCleared && !blockedFallbackReadStarted && normalizedPath === normalizeWorkspaceFsTestPath(blockedFallbackFile.fsPath)) {
+          blockedFallbackReadStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseBlockedFallbackRead = resolve;
+          });
+        }
+
+        return fsStub.readFile(uri);
+      }
+    } as typeof vscode.workspace.fs);
+    const executePatch = patchProperty(vscode.commands, 'executeCommand', (async () => []) as typeof vscode.commands.executeCommand);
+    const textClearPatch = patchProperty(TextIndex.prototype, 'clear', function (this: TextIndex) {
+      fallbackTextCleared = true;
+      return originalTextClear.call(this);
+    } as typeof TextIndex.prototype.clear);
+
+    try {
+      activate({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+      await waitFor(() => registeredCommands.has('fastIndexer.goToText'), 'goToText command registration');
+      await waitFor(() => fallbackTextCleared, 'fallback full build to clear text index');
+      await waitFor(() => blockedFallbackReadStarted, 'blocked fallback read to start');
+
+      const goToTextPromise = Promise.resolve(registeredCommands.get('fastIndexer.goToText')?.());
+      const commandOutcome = await Promise.race([
+        goToTextPromise.then(() => 'resolved'),
+        new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 20))
+      ]);
+
+      assert.equal(commandOutcome, 'waiting');
+      assert.equal(infoMessages.includes('No indexed text is available yet.'), false);
+
+      releaseBlockedFallbackRead?.();
+      await goToTextPromise;
+      assert.equal(merkleFailureThrown, true);
+      assert.equal(quickPicks.length, 1);
+      assert.equal(quickPicks[0]?.showed, true);
+    } finally {
+      releaseBlockedFallbackRead?.();
+      restoreProperty(textClearPatch);
+      restoreProperty(executePatch);
+      restoreProperty(fsPatch);
+      restoreProperty(persistenceWritePatch);
+      restoreProperty(persistenceReadPatch);
+      restoreProperty(configListenerPatch);
+      restoreProperty(watcherPatch);
+      restoreProperty(workspaceFoldersPatch);
+      restoreProperty(workspaceFolderPatch);
+      restoreProperty(relativePatch);
+      restoreProperty(configPatch);
+      restoreProperty(findFilesPatch);
+      restoreProperty(quickPickPatch);
+      restoreProperty(infoPatch);
+      restoreProperty(registerPatch);
+      restoreProperty(outputPatch);
+    }
+  });
+
   test('skips early text checkpoint persistence when the build generation changes at the persistence boundary', async () => {
     const workspaceRoot = 'c:\\workspace';
     const workspaceUri = vscode.Uri.file(workspaceRoot);
