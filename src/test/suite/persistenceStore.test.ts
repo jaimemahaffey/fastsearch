@@ -187,4 +187,48 @@ suite('PersistenceStore', () => {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  test('persists partial symbol hydration metadata', async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'fast-indexer-persist-'));
+    const store = new PersistenceStore(tempRoot);
+
+    const snapshot: PersistedWorkspaceSnapshot = {
+      metadata: {
+        schemaVersion: 2,
+        workspaceId: 'workspace-id',
+        configHash: 'config-hash',
+        layerState: {
+          availableLayers: ['file', 'text', 'symbol']
+        },
+        symbolHydration: {
+          status: 'running',
+          completedPaths: ['src/hydrated.ts'],
+          failedPaths: ['src/failed.ts'],
+          timedOutPaths: ['src/slow.ts']
+        }
+      },
+      merkle: {
+        rootHash: 'root-hash',
+        subtreeHashes: [],
+        leaves: []
+      },
+      fileIndex: [],
+      textIndex: [],
+      symbolIndex: []
+    };
+
+    try {
+      await store.writeWorkspaceSnapshot('workspace-id', snapshot);
+      const restored = await store.readWorkspaceSnapshot('workspace-id');
+
+      assert.deepEqual(restored?.metadata.symbolHydration, {
+        status: 'running',
+        completedPaths: ['src/hydrated.ts'],
+        failedPaths: ['src/failed.ts'],
+        timedOutPaths: ['src/slow.ts']
+      });
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
