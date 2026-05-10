@@ -1734,7 +1734,8 @@ async function buildCurrentWorkspaceMerkleFromCandidates(
   buildStatus: IndexBuildStatusReporter,
   progressToken: number,
   skippedFiles: number,
-  onLeafRead?: (candidate: WorkspaceCandidate, leaf: WorkspaceMerkleEntry) => void
+  onLeafRead?: (candidate: WorkspaceCandidate, leaf: WorkspaceMerkleEntry) => void,
+  onReadFailed?: () => void
 ): Promise<{ tree: MerkleTreeSnapshot; leavesByPath: Map<string, WorkspaceMerkleEntry>; } | undefined> {
   const leaves: WorkspaceMerkleEntry[] = [];
   let processedFiles = skippedFiles;
@@ -1770,6 +1771,9 @@ async function buildCurrentWorkspaceMerkleFromCandidates(
       );
       readFailed = true;
       stop = true;
+      if (shouldContinue()) {
+        onReadFailed?.();
+      }
       return;
     }
 
@@ -1852,11 +1856,12 @@ async function buildWorkspaceIndexesLayered(
     const restoredTextLayer = canReuseSnapshotLayer(previousSnapshot, 'text');
     const earlyTextHydratedPaths = new Set<string>();
     let textLayerMarkedReady = restoredTextLayer;
+    let merkleReadFailed = false;
     let readyTextCheckpointAttempted = false;
     let symbolTimeouts = 0;
 
     const markTextLayerReady = (): boolean => {
-      if (textLayerMarkedReady) {
+      if (textLayerMarkedReady || merkleReadFailed) {
         return false;
       }
 
@@ -1866,7 +1871,7 @@ async function buildWorkspaceIndexesLayered(
     };
 
     const hydrateEarlyTextFromMerkleLeaf = (candidate: WorkspaceCandidate, leaf: WorkspaceMerkleEntry): void => {
-      if (restoredTextLayer || textLayerMarkedReady || earlyTextHydratedPaths.size >= TEXT_HYDRATION_BATCH_SIZE || !shouldContinue()) {
+      if (merkleReadFailed || restoredTextLayer || textLayerMarkedReady || earlyTextHydratedPaths.size >= TEXT_HYDRATION_BATCH_SIZE || !shouldContinue()) {
         return;
       }
 
@@ -1929,9 +1934,18 @@ async function buildWorkspaceIndexesLayered(
       buildStatus,
       progressToken,
       skippedFiles,
-      hydrateEarlyTextFromMerkleLeaf
+      hydrateEarlyTextFromMerkleLeaf,
+      () => {
+        merkleReadFailed = true;
+        textLayerMarkedReady = false;
+        invalidateLayers(['file', 'text', 'symbol']);
+      }
     );
     if (!currentMerkle) {
+      if (!shouldContinue()) {
+        return { completed: false, canPersistSnapshot: false };
+      }
+
       invalidateLayers(['file', 'text', 'symbol']);
       const fallback = await buildWorkspaceIndexesFull(
         sortedCandidates.map((candidate) => candidate.uri),
